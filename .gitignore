@@ -1,0 +1,8 @@
+afhq/
+MNIST/
+model_saves/
+additional_datasets/
+.ipynb_checkpoints/
+__pycache__/
+*.pth
+*.yaml
