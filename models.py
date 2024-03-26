@@ -507,19 +507,107 @@ class MaskedConv2d(nn.Conv2d):
 
         H, W = self.weight.shape[2], self.weight.shape[3]
 
-        self.mask.fill_(0)
+        self.mask.fill_(1)
 
         if self.mask_type == 'A':
-            self.mask[:,:,:H//2, :] = 1
-            self.mask[:,:,H//2, :W//2] = 1
+            self.mask[:,:,H//2, W//2:] = 0
+            self.mask[:,:,H//2+1:, :] = 0
         elif self.mask_type == 'B':
-            self.mask[:,:,:H//2, :] = 1
-            self.mask[:,:,H//2, :W//2+1] = 1
+            self.mask[:,:,H//2, W//2 + 1:] = 0
+            self.mask[:,:,H//2+ 1:, :] = 0
     
     def forward(self, x):
         self.weight.data *= self.mask
         return super(MaskedConv2d, self).forward(x)
 
+
+
+
+class PixelCNN(nn.Module):
+    def __init__(self, in_channel, hidden_channel, nb_blocks, nb_classes = 1):
+        super().__init__()
+        self.nb_classes = nb_classes
+        
+        
+        self.conv_init = MaskedConv2d('A', in_channel, hidden_channel, 7, padding = 3)
+        self.convs = nn.ModuleList()
+        mask = 'B'
+        for i in range(nb_blocks):
+            self.convs.append(nn.Sequential(MaskedConv2d(mask,hidden_channel,hidden_channel , kernel_size = 7, padding = 3),
+                                        nn.ReLU(),
+                                        nn.BatchNorm2d(hidden_channel)))
+
+        self.conv_out = nn.Sequential(MaskedConv2d(mask, hidden_channel, hidden_channel, kernel_size = 1),
+                                        nn.ReLU(),
+                                        nn.BatchNorm2d(hidden_channel),
+                                        MaskedConv2d(mask, hidden_channel, 1 , 1),
+                                        nn.Sigmoid())
+                                    
+
+    def forward(self, x):
+        x = self.conv_init(x)
+        for conv in self.convs:
+            x = conv(x)
+        
+        out = self.conv_out(x)
+
+        return out
+
+    @torch.no_grad()
+    def generate(self, nb_samples, img_size):
+        img = torch.zeros(nb_samples, 1, img_size, img_size).to(self.conv_out[0].bias.device)
+        for i in range(img_size):
+            for j in range(img_size):
+                logits = self(2*(img-.5))
+                img[:,:,i,j] = torch.bernoulli(logits[:, :, i, j], out=logits[:, :, i, j])
+
+        return img
+
+class PixelCNN_paper(nn.Module):
+    def __init__(self, nb_blocks = 15, h = 32):
+        super().__init__()
+        self.conv_init = MaskedConv2d('A',1, 2*h, kernel_size = 7, padding = 3)
+
+        self.blocks = nn.ModuleList()
+        mask = 'B'
+        for _ in range(nb_blocks):
+            self.blocks.append(nn.Sequential(
+                nn.ReLU(),
+                MaskedConv2d(mask, 2*h, h, kernel_size = 1),
+                nn.ReLU(),
+                MaskedConv2d(mask, h, h, kernel_size = 3, padding = 1),
+                nn.ReLU(),
+                MaskedConv2d(mask, h, 2*h, kernel_size = 1)
+            ))
+
+        self.conv_out = nn.Sequential(
+            nn.ReLU(),
+            MaskedConv2d(mask, 2*h, 2*h, kernel_size = 1),
+            nn.ReLU(),
+            MaskedConv2d(mask, 2*h, 2*h, kernel_size = 1),
+            MaskedConv2d(mask, 2*h, 1, kernel_size = 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        x = self.conv_init(x)
+
+        for conv in self.blocks:
+            x = conv(x) + x
+        
+        out = self.conv_out(x)
+    
+        return out
+
+    @torch.no_grad()
+    def generate(self, nb_samples, img_size):
+        img = torch.zeros(nb_samples, 1, img_size, img_size).to(self.conv_out[1].bias.device)
+        for i in range(img_size):
+            for j in range(img_size):
+                logits = self(2*(img-.5))
+                img[:,:,i,j] = torch.bernoulli(logits[:, :, i, j], out=logits[:, :, i, j])
+
+        return img
 
 
 class PixelCNN_VQVAE(nn.Module):
@@ -560,6 +648,3 @@ class PixelCNN_VQVAE(nn.Module):
 
                 img[:,:,i,j] = torch.multinomial(probs[:,:,i,j] , num_samples = 1)
         return img
-
-
-
