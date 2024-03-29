@@ -1,8 +1,10 @@
 afhq/
 MNIST/
 model_saves/
+cifar-10-batches-py/
 additional_datasets/
 .ipynb_checkpoints/
 __pycache__/
 *.pth
 *.yaml
+*.gz

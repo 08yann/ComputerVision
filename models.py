@@ -18,6 +18,7 @@ import copy
 activation_dict = {
             'relu': nn.ReLU(),
             'leaky_relu': nn.LeakyReLU(),
+            'sigmoid': nn.Sigmoid(),
             'tanh': nn.Tanh(),
             'gelu': nn.GELU(),
             'silu': nn.SiLU(),
@@ -215,7 +216,6 @@ class VAE(nn.Module):
     
 
 
-
 class VAE_3D(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -228,10 +228,13 @@ class VAE_3D(nn.Module):
 
         self.conditionnal = config['conditionnal']
 
-        self.pad = [s//2 if s%2 == 1 else 0 for s in config['encoder_kernels']]
+        if 'encoder_pad' in config:
+            self.pad = config['encoder_pad']
+        else:
+            self.pad = [s//2 if s%2 == 1 else 0 for s in config['encoder_kernels']]
 
         self.nb_channels = copy.deepcopy(config['encoder_channels'])
-        self.nb_channels.insert(0, config['img_size'])
+        self.nb_channels.insert(0, config['img_channels'])
 
         enc_mlp_dims = config['encoder_mlp_dims']
         self.latent_dim = config['encoder_mlp_dims'][-1]
@@ -274,9 +277,10 @@ class VAE_3D(nn.Module):
         self.dec_convs = nn.ModuleList([nn.Sequential(
                                             nn.ConvTranspose2d(self.nb_channels[-i-1], self.nb_channels[-i-2], kernel_size=self.dec_kernels[i],stride=config['encoder_strides'][-i-1], padding=self.pad[-i-1], output_padding=self.output_pad[i]),
                                         nn.BatchNorm2d(self.nb_channels[-i-2]),
-                                        activation_dict[config['decoder_activation']]) for i in range(nb_convs)])
+                                        nn.Tanh() if i == nb_convs-1 else activation_dict[config['decoder_activation']]) for i in range(nb_convs)])
 
-        self.dec_mlp = nn.ModuleList([nn.Sequential(nn.Linear(dec_mlp_dims[i], dec_mlp_dims[i+1]), activation_dict[config['encoder_mlp_activation']]) for i in range(len(dec_mlp_dims)-1)])
+        #Ensure last activation leads to values in [0,1] 
+        self.dec_mlp = nn.ModuleList([nn.Sequential(nn.Linear(dec_mlp_dims[i], dec_mlp_dims[i+1]), activation_dict[config['decoder_mlp_activation']] ) for i in range(len(dec_mlp_dims)-1)])
         
         
     def reparameterize(self, mu, logvar):
@@ -438,7 +442,7 @@ class  VQ_VAE(nn.Module):
                                                     nn.BatchNorm2d(nb_channels[i+1]),
                                                     activation_dict[config['encoder_activation']]) for i in range(self.nb_convs-1)])
         
-        self.enc_convs.append(nn.Conv2d(nb_channels[-2], nb_channels[-1], kernel_size=config['encoder_kernels'][-1],stride = config['encoder_strides'][-1]))
+        self.enc_convs.append(nn.Conv2d(nb_channels[-2], nb_channels[-1], kernel_size=config['encoder_kernels'][-1],stride = config['encoder_strides'][-1], padding=self.pad[-1]))
             
         self.dec_kernels = copy.deepcopy(config['encoder_kernels'][::-1])
         for i in range(len(self.dec_kernels)):
@@ -474,7 +478,6 @@ class  VQ_VAE(nn.Module):
 
         quant_out, loss_embed, loss_commitment, quantized_idx = self.quantizer(enc_out)
         quant_out = self.post_conv_quant(quant_out)
-
         out = self.decoder(quant_out)
         return out, loss_embed, loss_commitment, quantized_idx
 
@@ -521,8 +524,8 @@ class MaskedConv2d(nn.Conv2d):
         return super(MaskedConv2d, self).forward(x)
 
 
-
-
+# First try for PixelCNN
+'''
 class PixelCNN(nn.Module):
     def __init__(self, in_channel, hidden_channel, nb_blocks, nb_classes = 1):
         super().__init__()
@@ -561,11 +564,13 @@ class PixelCNN(nn.Module):
                 logits = self(2*(img-.5))
                 img[:,:,i,j] = torch.bernoulli(logits[:, :, i, j], out=logits[:, :, i, j])
 
-        return img
+        return img'''
 
-class PixelCNN_paper(nn.Module):
-    def __init__(self, nb_blocks = 15, h = 32):
+class PixelCNN(nn.Module):
+    def __init__(self, nb_blocks = 15, h = 32, nb_classes = 2, kernel = 3):
         super().__init__()
+        self.nb_classes = nb_classes
+
         self.conv_init = MaskedConv2d('A',1, 2*h, kernel_size = 7, padding = 3)
 
         self.blocks = nn.ModuleList()
@@ -574,20 +579,27 @@ class PixelCNN_paper(nn.Module):
             self.blocks.append(nn.Sequential(
                 nn.ReLU(),
                 MaskedConv2d(mask, 2*h, h, kernel_size = 1),
+                nn.BatchNorm2d(h),
                 nn.ReLU(),
-                MaskedConv2d(mask, h, h, kernel_size = 3, padding = 1),
+                MaskedConv2d(mask, h, h, kernel_size = kernel, padding = kernel//2),
+                nn.BatchNorm2d(h),
                 nn.ReLU(),
-                MaskedConv2d(mask, h, 2*h, kernel_size = 1)
+                MaskedConv2d(mask, h, 2*h, kernel_size = 1),
+                nn.BatchNorm2d(2*h)
             ))
-
+            
         self.conv_out = nn.Sequential(
             nn.ReLU(),
-            MaskedConv2d(mask, 2*h, 2*h, kernel_size = 1),
+            MaskedConv2d(mask, 2*h, h, kernel_size = 1),
             nn.ReLU(),
-            MaskedConv2d(mask, 2*h, 2*h, kernel_size = 1),
-            MaskedConv2d(mask, 2*h, 1, kernel_size = 1),
-            nn.Sigmoid()
+            MaskedConv2d(mask, h, h, kernel_size = 1),
+            MaskedConv2d(mask, h, self.nb_classes, kernel_size = 1)
         )
+
+        if self.nb_classes == 2:
+            self.conv_out.append(nn.Sigmoid())
+        else:
+            self.conv_out.append(nn.Softmax(dim = 1))
 
     def forward(self, x):
         x = self.conv_init(x)
@@ -605,7 +617,10 @@ class PixelCNN_paper(nn.Module):
         for i in range(img_size):
             for j in range(img_size):
                 logits = self(2*(img-.5))
-                img[:,:,i,j] = torch.bernoulli(logits[:, :, i, j], out=logits[:, :, i, j])
+                if self.nb_classes == 2:
+                    img[:,:,i,j] = torch.bernoulli(logits[:, :, i, j], out=logits[:, :, i, j])
+                else:
+                    img[:,:,i,j] = torch.multinomial(logits[:, :, i, j], num_samples=1)/(self.nb_classes-1)
 
         return img
 
