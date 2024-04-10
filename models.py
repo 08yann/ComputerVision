@@ -12,7 +12,7 @@ import copy
 # out = (in - kernel +2 * padding)// stride + 1
 
 ## ConvTranspose2d:
-# out = (in - 1) * stride + kernel -2* padding
+# out = (in - 1) * stride + kernel -2* padding + out_padding
 ####################################################
 
 activation_dict = {
@@ -214,7 +214,167 @@ class VAE(nn.Module):
 
         return x_hat, mean, logvar
     
+class VAE_Block(nn.Module):
+    def __init__(self,in_channel, out_channel, kernel, stride):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_channel, out_channel, kernel_size=kernel,stride = stride, padding = kernel//2, bias = False)
+        self.bn1 = nn.BatchNorm2d(out_channel)
+        self.conv2 = nn.Conv2d(out_channel, out_channel, kernel_size=kernel, padding = kernel//2, bias = False)
+        self.bn2 = nn.BatchNorm2d(out_channel)
 
+        self.downsample = None
+        if stride != 1 or in_channel != out_channel:
+            self.downsample = nn.Sequential(
+                nn.Conv2d(in_channel, out_channel, kernel_size=1, stride = stride, bias = False),
+                nn.BatchNorm2d(out_channel))
+        
+    def forward(self, x):
+        if self.downsample is not None:
+            resid = self.downsample(x)
+        else:
+            resid = x
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = self.bn2(self.conv2(x))
+
+        x += resid
+        out = F.relu(x)
+        return out
+
+
+class VAE_complex(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        nb_convs = len(config['encoder_kernels'])
+        assert len(config['encoder_strides']) == nb_convs
+        assert len(config['encoder_channels']) == nb_convs
+
+        nb_convT = len(config['decoder_channels'])
+        assert nb_convT <= nb_convs
+
+        self.init_conv = nn.Sequential(
+            nn.Conv2d(config['img_channels'], config['encoder_channels'][0], kernel_size = config['encoder_kernels'][0], stride = config['encoder_strides'][0], padding=config['encoder_kernels'][0]//2, bias = False),
+            nn.BatchNorm2d(config['encoder_channels'][0]),
+            nn.ReLU())
+
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride = config['maxpool_stride'], padding = 1)
+        
+        self.encoder_blocks = nn.ModuleList()
+        for i in range(1, nb_convs):
+            self.encoder_blocks.append(VAE_Block(config['encoder_channels'][i-1], config['encoder_channels'][i], config['encoder_kernels'][i], config['encoder_strides'][i]))
+
+            for j in range(1, config['encoder_size_blocks']):
+                self.encoder_blocks.append(VAE_Block(config['encoder_channels'][i], config['encoder_channels'][i], config['encoder_kernels'][i], stride = 1))
+        sizes_history = []
+        img_size_out = config['img_size']
+        sizes_history.append(img_size_out)
+        for i in range(nb_convs):
+            img_size_out = (img_size_out - config['encoder_kernels'][i] +2 * (config['encoder_kernels'][i]//2))// config['encoder_strides'][i] + 1
+            sizes_history.append(img_size_out)
+            if (i == 0) & (config['maxpool_stride']!=1):
+                img_size_out = (img_size_out - 3 + 2)//config['maxpool_stride'] + 1
+                sizes_history.append(img_size_out)
+
+        self.img_sizes_hist = sizes_history
+
+        # reduce image to size with height and wifth: 1 x 1
+        self.encoder_avgpool = nn.AvgPool2d(kernel_size = img_size_out, stride = 1)
+        
+        self.mlp = nn.Linear(config['encoder_channels'][-1], config['encoder_channels'][-1])
+
+        self.mlp_mu = nn.Linear(config['encoder_channels'][-1], config['latent_dim'])
+        self.mlp_logvar = nn.Linear(config['encoder_channels'][-1], config['latent_dim'])
+
+        # Decoder
+        
+        nb_convT = len(config['decoder_channels'])
+        self.decoder_output_pad = []
+
+        in_size = config['img_size']
+        # Compute size of the necessary last linear layer before ConvTranspose in decoder to ensure output has same size as data
+        for _ in range(nb_convT):
+            if in_size % 2 == 0:
+                in_size = in_size// 2
+                self.decoder_output_pad.append(1)
+            else:
+                in_size = (in_size -1)//2
+                self.decoder_output_pad.append(0)
+    
+
+        self.start_img_size = in_size
+        self.latent_dim = config['latent_dim']
+
+        self.mlp_decoder = nn.Sequential(
+            nn.Linear(self.latent_dim,self.latent_dim),
+            nn.ReLU(),
+            nn.Linear(self.latent_dim, self.start_img_size**2*config['decoder_channels'][0]),
+            nn.ReLU()
+        )
+
+        self.convT_layers = nn.ModuleList()
+        for i in range(nb_convT):
+            if i == nb_convT -1:
+                self.convT_layers.append(nn.Sequential(
+                    nn.ConvTranspose2d(config['decoder_channels'][i], config['img_channels'], 3, stride = 2, padding = 1, output_padding=self.decoder_output_pad[i])                ))
+            else:
+                self.convT_layers.append(nn.Sequential(
+                    nn.ConvTranspose2d(config['decoder_channels'][i], config['decoder_channels'][i+1], 3, stride = 2, padding = 1, output_padding=self.decoder_output_pad[i]),
+                    nn.ReLU()
+                ))
+
+        self.convT_layers = nn.Sequential(*self.convT_layers)
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
+    def reparameterize(self, mu, logvar):
+        eps1 = torch.randn_like(logvar)
+        eps2 = torch.randn_like(logvar)
+        std = torch.exp(0.5*logvar)
+        return mu + std* eps1
+
+    def decoder(self,x):
+        B = x.shape[0]
+        x = self.mlp_decoder(x)
+
+        x = x.view(B,-1,self.start_img_size,self.start_img_size )
+        x = self.convT_layers(x)
+        out = F.sigmoid(x)
+        return out
+
+    def forward(self, x):
+        B = x.shape[0]
+        x = self.init_conv(x)
+        x = self.maxpool(x)
+
+        for block in self.encoder_blocks:
+            x = block(x)
+        
+        x = self.encoder_avgpool(x)
+
+        x_encoded = x.view(B,-1)
+        x_encoded = F.relu(self.mlp(x_encoded))
+
+        mu = self.mlp_mu(x_encoded)
+        logvar = self.mlp_logvar(x_encoded)
+
+        z = self.reparameterize(mu, logvar)
+
+        x_hat = self.decoder(z)
+        
+        return x_hat, mu, logvar
+
+    @torch.no_grad()
+    def sample(self, nb_images, z = None):            
+        if z is None:
+            device = self.init_conv[0].weight.device
+            z = torch.randn((nb_images, self.latent_dim)).to(device)
+
+        x_pred = self.decoder(z)
+        return x_pred
 
 class VAE_3D(nn.Module):
     def __init__(self, config):
@@ -276,7 +436,6 @@ class VAE_3D(nn.Module):
             self.nb_channels[0] -= self.nb_classes
         self.dec_convs = nn.ModuleList([nn.Sequential(
                                             nn.ConvTranspose2d(self.nb_channels[-i-1], self.nb_channels[-i-2], kernel_size=self.dec_kernels[i],stride=config['encoder_strides'][-i-1], padding=self.pad[-i-1], output_padding=self.output_pad[i]),
-                                        nn.BatchNorm2d(self.nb_channels[-i-2]),
                                         nn.Tanh() if i == nb_convs-1 else activation_dict[config['decoder_activation']]) for i in range(nb_convs)])
 
         #Ensure last activation leads to values in [0,1] 

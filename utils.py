@@ -48,24 +48,45 @@ def get_balanced_sampler(labels):
     return WeightedRandomSampler(weights, len(weights))
 
 
-def get_dataloader(root = './afhq/', img_size = 224,batch_size = 32, prob = 0.5, split = 'train'):
+def get_dataloader(root = './afhq/', img_size = 224,batch_size = 32, prob = 0.5, split = 'train', animals = None, norm_values = None):
     if split == 'train' or split == 'val':
         root_folder = root+ split + '/'
         root_folder = root + split+'/'
     else:
         return NotImplementedError
+
     crop = transforms.RandomResizedCrop(img_size, scale = [0.8,1.0],ratio = [0.9,1.1])
     rand_crop = transforms.Lambda(lambda x: crop(x) if np.random.uniform()<prob else x)
 
+    if norm_values is not None:
+        assert len(norm_values) == 2
+
+        mean = norm_values[0]
+        std = norm_values[1]
+    else:
+        mean = (0.5,0.5,0.5)
+        std = (0.5,0.5,0.5)
     transform = transforms.Compose([
         rand_crop,
         transforms.Resize(img_size),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])])
+        transforms.Normalize(mean=mean, std=std)
+        ])
     data = torchvision.datasets.ImageFolder(root_folder, transform)
     classes = data.classes
-    return DataLoader(data, batch_size, shuffle = True), classes
+    if animals is not None:
+        idx_keep = [i for i in range(len(data)) if data.imgs[i][1] in [data.class_to_idx[a] for a in animals]]
+        classes = animals
+
+        data = torch.utils.data.Subset(data, idx_keep)
+    
+    unnormalizer = transforms.Compose([
+        transforms.Normalize(mean = 0., std = 1/torch.tensor(std)),
+        transforms.Normalize(mean = -torch.tensor(mean), std = 1.)
+    ])
+
+    return DataLoader(data, batch_size, shuffle = True), classes, unnormalizer
 
 
 def quantisize(images, levels):
@@ -76,11 +97,12 @@ def quantisize(images, levels):
 
 
 class MNIST_colorized(Dataset):
-    def __init__(self, training = True):
+    def __init__(self, training = True, img_size=28):
         self.images, self.labels = self._make_dataset(train = training)
 
         self.transform = transforms.Compose([
             transforms.ToTensor(),
+            transforms.Resize(img_size),
             transforms.Normalize(mean = [0.5,0.5,0.5], std = [0.5,0.5,0.5])
         ])
 
