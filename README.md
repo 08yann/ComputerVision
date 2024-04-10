@@ -1,0 +1,1 @@
+Implementation of different computer vision models, first on MNIST dataset (1x28x28) and then on higher dimensional images dataset such as AFHQ (animal faces high quality, 3x224x244).
