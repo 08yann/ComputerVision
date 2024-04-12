@@ -9,3 +9,6 @@ __pycache__/
 *.yaml
 *.gz
 oxford-iiit-pet/
+*.gv
+*.pdf
+*.png

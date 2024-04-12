@@ -67,9 +67,9 @@ def get_dataloader(root = './afhq/', img_size = 224,batch_size = 32, prob = 0.5,
         mean = (0.5,0.5,0.5)
         std = (0.5,0.5,0.5)
     transform = transforms.Compose([
-        rand_crop,
-        transforms.Resize(img_size),
-        transforms.RandomHorizontalFlip(),
+        #rand_crop,
+        transforms.Resize((img_size,img_size)),
+        #transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize(mean=mean, std=std)
         ])

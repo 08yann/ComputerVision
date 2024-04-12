@@ -213,9 +213,116 @@ class VAE(nn.Module):
         x_hat = self.decoder(z)
 
         return x_hat, mean, logvar
+
+# VAE_complex (code below) cannot decode correctly, hence other architecture implementation
+class VAEBlock_other(nn.Module):
+    def __init__(self,in_channel):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(in_channel, in_channel, 1),
+            nn.LeakyReLU(),
+            nn.Conv2d(in_channel, in_channel, 3, padding=1),
+            nn.BatchNorm2d(in_channel),
+            nn.LeakyReLU(),
+        )
     
+    def forward(self,x):
+        out = x + self.block(x)
+        return out
+
+class VAE_other(nn.Module):
+    def __init__(self, channels, latent_dim):
+        super().__init__()
+        self.blocks_conv = nn.ModuleList()
+        self.chan = copy.deepcopy(channels)
+        self.chan.insert(0,3)
+        for i in range(1,len(self.chan)):
+            self.blocks_conv.append(nn.Sequential(
+                nn.Conv2d(self.chan[i-1], self.chan[i], 3, stride = 2, padding = 1),
+                nn.BatchNorm2d(self.chan[i]),
+                nn.LeakyReLU()
+            ))
+        
+        self.enc_block = nn.Sequential(*[VAEBlock_other(self.chan[-1]) for _ in range(4)])
+
+        self.mlp_mu = nn.Sequential(
+            nn.Linear(self.chan[-1]*16, self.chan[-1]),
+            nn.LeakyReLU(),
+            nn.Linear(self.chan[-1], latent_dim)    
+        )
+
+        self.mlp_logvar = nn.Sequential(
+            nn.Linear(self.chan[-1]*16, self.chan[-1]),
+            nn.LeakyReLU(),
+            nn.Linear(self.chan[-1], latent_dim)    
+        )
+
+
+        self.dec_mlp = nn.Sequential(
+            nn.Linear(latent_dim, self.chan[-1]),
+            nn.LeakyReLU(),
+            nn.Linear(self.chan[-1], self.chan[-1]*16)
+        )
+
+        self.dec_block = nn.Sequential(*[VAEBlock_other(self.chan[-1]) for _ in range(4)])
+
+        self.dec_convTs = nn.ModuleList()
+        for i in range(len(channels),1,-1):
+            self.dec_block.append(nn.Sequential(
+                nn.ConvTranspose2d(self.chan[i], self.chan[i-1], 3, stride = 2, padding=1, output_padding=1),
+                nn.BatchNorm2d(self.chan[i-1]),
+                nn.LeakyReLU()
+            ))
+
+        self.final = nn.Sequential(
+            nn.ConvTranspose2d(self.chan[1], self.chan[1], 3, stride = 2, padding = 1, output_padding=1),
+            nn.LeakyReLU(),
+            nn.Conv2d(self.chan[1], self.chan[0], 3, padding=1),
+            nn.Tanh()
+        )
+
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5*logvar)
+        eps = torch.randn_like(std)
+        return eps * std + mu
+
+    def decoder(self,x):
+        x = self.dec_mlp(x)
+        x = x.view(-1,512,4,4)
+        x = self.dec_block(x)
+        for block in self.dec_convTs:
+            x = block(x)
+        out = self.final(x)
+
+        return out
+
+    def forward(self, x):
+        for block in self.blocks_conv:
+            x = block(x)
+
+        x = self.enc_block(x)
+        out = torch.flatten(x, start_dim = 1)
+        mu = self.mlp_mu(out)
+        logvar = self.mlp_logvar(out)
+
+        z = self.reparameterize(mu, logvar)
+
+        x_hat = self.decoder(z)
+        return x_hat, mu, logvar
+
+    @torch.no_grad()
+    def sample(self, nb_images, z = None):            
+        if z is None:
+            device = self.mlp_mu[0].weight.device
+            z = torch.randn((nb_images, 512)).to(device)
+
+        x_pred = self.decoder(z)
+        return x_pred
+
+
+
 class VAE_Block(nn.Module):
-    def __init__(self,in_channel, out_channel, kernel, stride):
+    def __init__(self,in_channel, out_channel, kernel, stride, last_activ = nn.LeakyReLU()):
         super().__init__()
         self.conv1 = nn.Conv2d(in_channel, out_channel, kernel_size=kernel,stride = stride, padding = kernel//2, bias = False)
         self.bn1 = nn.BatchNorm2d(out_channel)
@@ -228,18 +335,18 @@ class VAE_Block(nn.Module):
                 nn.Conv2d(in_channel, out_channel, kernel_size=1, stride = stride, bias = False),
                 nn.BatchNorm2d(out_channel))
         
+        self.last_activation = last_activ
     def forward(self, x):
         if self.downsample is not None:
             resid = self.downsample(x)
         else:
             resid = x
-        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.leaky_relu(self.bn1(self.conv1(x)))
         x = self.bn2(self.conv2(x))
 
         x += resid
-        out = F.relu(x)
+        out = self.last_activation(x)
         return out
-
 
 class VAE_complex(nn.Module):
     def __init__(self, config):
@@ -254,7 +361,7 @@ class VAE_complex(nn.Module):
         self.init_conv = nn.Sequential(
             nn.Conv2d(config['img_channels'], config['encoder_channels'][0], kernel_size = config['encoder_kernels'][0], stride = config['encoder_strides'][0], padding=config['encoder_kernels'][0]//2, bias = False),
             nn.BatchNorm2d(config['encoder_channels'][0]),
-            nn.ReLU())
+            nn.LeakyReLU())
 
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride = config['maxpool_stride'], padding = 1)
         
@@ -305,23 +412,26 @@ class VAE_complex(nn.Module):
 
         self.mlp_decoder = nn.Sequential(
             nn.Linear(self.latent_dim,self.latent_dim),
-            nn.ReLU(),
+            nn.LeakyReLU(),
             nn.Linear(self.latent_dim, self.start_img_size**2*config['decoder_channels'][0]),
-            nn.ReLU()
+            nn.LeakyReLU()
         )
 
         self.convT_layers = nn.ModuleList()
         for i in range(nb_convT):
             if i == nb_convT -1:
                 self.convT_layers.append(nn.Sequential(
-                    nn.ConvTranspose2d(config['decoder_channels'][i], config['img_channels'], 3, stride = 2, padding = 1, output_padding=self.decoder_output_pad[i])                ))
+                    nn.ConvTranspose2d(config['decoder_channels'][i], config['img_channels'], 3, stride = 2, padding = 1, output_padding=self.decoder_output_pad[i])))
             else:
                 self.convT_layers.append(nn.Sequential(
                     nn.ConvTranspose2d(config['decoder_channels'][i], config['decoder_channels'][i+1], 3, stride = 2, padding = 1, output_padding=self.decoder_output_pad[i]),
-                    nn.ReLU()
+                    nn.LeakyReLU()
                 ))
 
         self.convT_layers = nn.Sequential(*self.convT_layers)
+
+        self.decoder_blockconvs = nn.ModuleList([VAE_Block(config['img_channels'],config['img_channels'] ,kernel=3, stride = 1)  for _ in range(config['decoder_nb_blockconvs']-1)])
+        self.decoder_blockconvs.append(VAE_Block(config['img_channels'],config['img_channels'] ,kernel=3, stride = 1, last_activ=nn.Tanh()))
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -342,8 +452,9 @@ class VAE_complex(nn.Module):
 
         x = x.view(B,-1,self.start_img_size,self.start_img_size )
         x = self.convT_layers(x)
-        out = F.sigmoid(x)
-        return out
+        for block in self.decoder_blockconvs:
+            x = block(x)
+        return x
 
     def forward(self, x):
         B = x.shape[0]
@@ -356,7 +467,7 @@ class VAE_complex(nn.Module):
         x = self.encoder_avgpool(x)
 
         x_encoded = x.view(B,-1)
-        x_encoded = F.relu(self.mlp(x_encoded))
+        x_encoded = F.leaky_relu(self.mlp(x_encoded))
 
         mu = self.mlp_mu(x_encoded)
         logvar = self.mlp_logvar(x_encoded)
@@ -682,48 +793,6 @@ class MaskedConv2d(nn.Conv2d):
         self.weight.data *= self.mask
         return super(MaskedConv2d, self).forward(x)
 
-
-# First try for PixelCNN
-'''
-class PixelCNN(nn.Module):
-    def __init__(self, in_channel, hidden_channel, nb_blocks, nb_classes = 1):
-        super().__init__()
-        self.nb_classes = nb_classes
-        
-        
-        self.conv_init = MaskedConv2d('A', in_channel, hidden_channel, 7, padding = 3)
-        self.convs = nn.ModuleList()
-        mask = 'B'
-        for i in range(nb_blocks):
-            self.convs.append(nn.Sequential(MaskedConv2d(mask,hidden_channel,hidden_channel , kernel_size = 7, padding = 3),
-                                        nn.ReLU(),
-                                        nn.BatchNorm2d(hidden_channel)))
-
-        self.conv_out = nn.Sequential(MaskedConv2d(mask, hidden_channel, hidden_channel, kernel_size = 1),
-                                        nn.ReLU(),
-                                        nn.BatchNorm2d(hidden_channel),
-                                        MaskedConv2d(mask, hidden_channel, 1 , 1),
-                                        nn.Sigmoid())
-                                    
-
-    def forward(self, x):
-        x = self.conv_init(x)
-        for conv in self.convs:
-            x = conv(x)
-        
-        out = self.conv_out(x)
-
-        return out
-
-    @torch.no_grad()
-    def generate(self, nb_samples, img_size):
-        img = torch.zeros(nb_samples, 1, img_size, img_size).to(self.conv_out[0].bias.device)
-        for i in range(img_size):
-            for j in range(img_size):
-                logits = self(2*(img-.5))
-                img[:,:,i,j] = torch.bernoulli(logits[:, :, i, j], out=logits[:, :, i, j])
-
-        return img'''
 
 class PixelCNN(nn.Module):
     def __init__(self, nb_blocks = 15, h = 32, nb_classes = 2, kernel = 3):
