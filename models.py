@@ -363,7 +363,10 @@ class VAE_complex(nn.Module):
             nn.BatchNorm2d(config['encoder_channels'][0]),
             nn.LeakyReLU())
 
-        self.maxpool = nn.MaxPool2d(kernel_size=3, stride = config['maxpool_stride'], padding = 1)
+        if config['maxpool_stride']==0:
+            self.maxpool = nn.Identity()
+        else:
+            self.maxpool = nn.MaxPool2d(kernel_size=3, stride = config['maxpool_stride'], padding = 1)
         
         self.encoder_blocks = nn.ModuleList()
         for i in range(1, nb_convs):
@@ -377,19 +380,31 @@ class VAE_complex(nn.Module):
         for i in range(nb_convs):
             img_size_out = (img_size_out - config['encoder_kernels'][i] +2 * (config['encoder_kernels'][i]//2))// config['encoder_strides'][i] + 1
             sizes_history.append(img_size_out)
-            if (i == 0) & (config['maxpool_stride']!=1):
+            if (i == 0) & (config['maxpool_stride']>1):
                 img_size_out = (img_size_out - 3 + 2)//config['maxpool_stride'] + 1
                 sizes_history.append(img_size_out)
 
         self.img_sizes_hist = sizes_history
 
-        # reduce image to size with height and wifth: 1 x 1
-        self.encoder_avgpool = nn.AvgPool2d(kernel_size = img_size_out, stride = 1)
+        # reduce image to size with height and width: 1 x 1
+        if config['avgpool']:
+            self.encoder_avgpool = nn.AvgPool2d(kernel_size = img_size_out, stride = 1)
+            mlp_size = config['encoder_channels'][-1]
+        else:
+            self.encoder_avgpool = nn.Identity()
+            mlp_size = config['encoder_channels'][-1]*self.img_sizes_hist[-1]**2
         
-        self.mlp = nn.Linear(config['encoder_channels'][-1], config['encoder_channels'][-1])
+        self.mlp = nn.Linear(mlp_size, mlp_size)
 
-        self.mlp_mu = nn.Linear(config['encoder_channels'][-1], config['latent_dim'])
-        self.mlp_logvar = nn.Linear(config['encoder_channels'][-1], config['latent_dim'])
+        self.mlp_mu = nn.Sequential(
+            nn.Linear(mlp_size, mlp_size),
+            nn.LeakyReLU(),
+            nn.Linear(mlp_size, config['latent_dim']))
+
+        self.mlp_logvar = nn.Sequential(
+            nn.Linear(mlp_size, mlp_size),
+            nn.LeakyReLU(),
+            nn.Linear(mlp_size, config['latent_dim']))
 
         # Decoder
         
@@ -403,8 +418,10 @@ class VAE_complex(nn.Module):
                 in_size = in_size// 2
                 self.decoder_output_pad.append(1)
             else:
-                in_size = (in_size -1)//2
+                in_size = (in_size +1)//2
                 self.decoder_output_pad.append(0)
+        
+        self.decoder_output_pad = self.decoder_output_pad[::-1]
     
 
         self.start_img_size = in_size
@@ -429,10 +446,11 @@ class VAE_complex(nn.Module):
                 ))
 
         self.convT_layers = nn.Sequential(*self.convT_layers)
-
-        self.decoder_blockconvs = nn.ModuleList([VAE_Block(config['img_channels'],config['img_channels'] ,kernel=3, stride = 1)  for _ in range(config['decoder_nb_blockconvs']-1)])
-        self.decoder_blockconvs.append(VAE_Block(config['img_channels'],config['img_channels'] ,kernel=3, stride = 1, last_activ=nn.Tanh()))
-
+        if config['decoder_nb_blockconvs'] == 0:
+            self.decoder_blockconvs = nn.ModuleList([nn.Tanh()])    
+        else:
+            self.decoder_blockconvs = nn.ModuleList([VAE_Block(config['img_channels'],config['img_channels'] ,kernel=3, stride = 1)  for _ in range(config['decoder_nb_blockconvs']-1)])
+            self.decoder_blockconvs.append(VAE_Block(config['img_channels'],config['img_channels'] ,kernel=3, stride = 1, last_activ=nn.Tanh()))
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
@@ -463,17 +481,13 @@ class VAE_complex(nn.Module):
 
         for block in self.encoder_blocks:
             x = block(x)
-        
         x = self.encoder_avgpool(x)
-
         x_encoded = x.view(B,-1)
-        x_encoded = F.leaky_relu(self.mlp(x_encoded))
 
         mu = self.mlp_mu(x_encoded)
         logvar = self.mlp_logvar(x_encoded)
 
         z = self.reparameterize(mu, logvar)
-
         x_hat = self.decoder(z)
         
         return x_hat, mu, logvar
@@ -487,6 +501,35 @@ class VAE_complex(nn.Module):
         x_pred = self.decoder(z)
         return x_pred
 
+
+
+class MultiStage_VAE(nn.Module):
+    def __init__(self, config, size_second_stage):
+        super().__init__()
+        self.config = config
+        self.vae = VAE_complex(self.config)
+
+        self.second_stage = nn.ModuleList([VAE_Block(config['img_channels'], config['img_channels'],kernel=3, stride=1) for _ in range(size_second_stage-1)])
+        self.second_stage.append(VAE_Block(config['img_channels'], config['img_channels'],kernel=3, stride=1, last_activ = nn.Tanh()))
+        self.second_stage = nn.Sequential(*self.second_stage)
+    def forward(self,x):
+        x_first, mu, logvar = self.vae(x)
+        out = self.second_stage(x_first)
+
+        return out, x_first, mu, logvar
+
+    @torch.no_grad()
+    def sample(self, nb_images, z = None):            
+        if z is None:
+            device = self.second_stage[0].conv1.weight.device
+            z = torch.randn((nb_images, self.vae.latent_dim)).to(device)
+
+        x_first = self.vae.decoder(z)
+        x_pred = self.second_stage(x_first)
+        return x_pred
+
+
+# Simple model, interesting for MNIST dataset especially the manifold function for 2-dimensional latent space. 
 class VAE_3D(nn.Module):
     def __init__(self, config):
         super().__init__()
