@@ -14,8 +14,8 @@ testing.ipynb
 oxford-iiit-pet/
 *.gv
 *.pdf
-*.png
 MultiStage_VAE_training.ipynb
 ResNet_training.ipynb
 rnn_torchviz
 VAE_training.ipynb
+*.gv.png

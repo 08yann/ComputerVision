@@ -12,15 +12,15 @@ model:
   avgpool: False
   maxpool_stride: 0
   encoder_channels: [16,32,64]
-  latent_dim: 10
+  latent_dim: 2
   decoder_channels: [64,32,16]
   decoder_nb_blockconvs: 0
   size_second_stage: 3
   conditionnal: False
 optimization:
   lr: 0.0005
-  kl_weight:  0.1
-  criterion: 'mse'
+  kl_weight:  1
+  criterion: 'bce'
   reduction: 'sum'
   epochs: 20
   weight_decay: 0
