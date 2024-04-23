@@ -1,0 +1,27 @@
+dataset:
+  name: 'MNIST'
+  batch_size: 256
+  img_size: 28
+  mean: 0.5
+  std: 0.5
+model:
+  name: 'MultiStage_VAE'
+  encoder_kernels: [7,3,3]
+  encoder_strides: [2,2,2]
+  encoder_size_blocks: 1
+  avgpool: False
+  maxpool_stride: 0
+  encoder_channels: [16,32,64]
+  latent_dim: 10
+  decoder_channels: [64,32,16]
+  decoder_nb_blockconvs: 0
+  size_second_stage: 3
+  conditionnal: False
+optimization:
+  lr: 0.0005
+  kl_weight:  0.1
+  criterion: 'mse'
+  reduction: 'sum'
+  epochs: 20
+  weight_decay: 0
+  beta_1: 0.5

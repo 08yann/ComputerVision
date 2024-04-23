@@ -4,7 +4,8 @@ import torch.nn.functional as F
 import torchvision
 import math
 import copy
-
+import abc
+from utils import ELBO_gaussian
 ####################################################
 ### Compute output size of convolutions
 
@@ -39,12 +40,12 @@ class ResBlock(nn.Module):
             self.n_channel = n_channel
             self.downsample = False
         
-        self.bnorm1 = nn.BatchNorm2d(self.n_channel, eps = 1e-8, momentum = 0)
+        self.bnorm1 = nn.BatchNorm2d(self.n_channel, eps = 1e-8)
         self.conv2 = nn.Conv2d(self.n_channel, self.n_channel, kernel_size, padding = 1)
-        self.bnorm2 = nn.BatchNorm2d(self.n_channel, eps = 1e-8, momentum = 0)
-        self.bnorm_skip = nn.BatchNorm2d(self.n_channel, eps = 1e-8, momentum = 0)
+        self.bnorm2 = nn.BatchNorm2d(self.n_channel, eps = 1e-8)
+        self.bnorm_skip = nn.BatchNorm2d(self.n_channel, eps = 1e-8)
 
-    def forward(self,x):
+    def forward(self,x, label = None):
         out = F.relu(self.bnorm1(self.conv1(x)))
         out = self.bnorm2(self.conv2(out))
         
@@ -54,58 +55,61 @@ class ResBlock(nn.Module):
 
         return out
 
-
 class ResNet(nn.Module):
-    def __init__(self,n_classes, nb_channels = 64, nb_repeat = 2, nb_blocks = 4):
+    def __init__(self,config, img_shape, nb_classes):
         super().__init__()
+        self.img_channels, self.img_size = img_shape[0], img_shape[1]
+        self.nb_channels = config['model']['nb_channels']
+        self.nb_blocks = config['model']['nb_blocks']
+        self.size_block = config['model']['size_block']
+        self.conv1 = nn.Conv2d(self.img_channels,self.nb_channels, 7, stride = 2, padding = 3)
+        self.bnorm1 = nn.BatchNorm2d(self.nb_channels, eps = 1e-8)
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride = 2, padding = 1) if config['model']['maxpool'] else nn.Identity()
 
-        self.conv1 = nn.Conv2d(3,nb_channels, 7, stride = 2, padding = 3)
-        self.bnorm1 = nn.BatchNorm2d(nb_channels, eps = 1e-8, momentum = 0)
-
-        self.maxpool = nn.MaxPool2d(kernel_size=3, stride = 2, padding = 1)
-
-        list_blocks = []
-        for _ in range(nb_repeat):
-            list_blocks.append(ResBlock(nb_channels, 3))
-
-        for i in range(1, nb_blocks):
-            for j in range(nb_repeat):
+        self.list_blocks = nn.ModuleList()
+        for i in range(self.nb_blocks):
+            for j in range(self.size_block):
                 if j == 0:
-                    list_blocks.append(ResBlock(2**(i-1)*nb_channels, 3, 2))
+                    self.list_blocks.append(ResBlock(2**i*self.nb_channels, kernel_size=3, stride = 2))
                 else:
-                    list_blocks.append(ResBlock(2**i*nb_channels,3))
-            
-        self.blocks = nn.Sequential(*list_blocks)
+                    self.list_blocks.append(ResBlock(2**(i+1)*self.nb_channels, kernel_size=3, stride = 1))
 
-        self.ln = nn.Linear(7*7*2**i*nb_channels,n_classes, bias=False)
+        out_size = self.img_size
+        halvings = self.nb_blocks + 1
+        if config['model']['maxpool']: halvings += 1
+        for _ in range(halvings):
+            out_size = (out_size - 1)// 2 + 1
+        self.out_size = out_size
+        self.ln = nn.Linear(self.out_size**2*2**(self.nb_blocks)*self.nb_channels,nb_classes, bias=False)
 
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.normal_(m.weight, 1.0, 0.02)
+                nn.init.constant_(m.bias, 0)
 
-    def forward(self, x):
+    def forward(self, x, label = None):
         B = x.shape[0]
         x = F.relu(self.bnorm1(self.conv1(x)))
         x = self.maxpool(x)
 
-        for block in self.blocks:
+        for block in self.list_blocks:
             x = block(x)
 
         x = x.view(B,-1)
         x = self.ln(x)
         return x
 
-def weights_init(m):
-    classname = m.__class__.__name__
-    if classname.find('Conv') != -1:
-        m.weight.data.normal_(0.0, 0.02)
-    elif classname.find('BatchNorm') != -1:
-        m.weight.data.normal_(1.0, 0.02)
-        m.bias.data.fill_(0)
-
+    def loss_function(self, x_pred, x_true):
+        loss = F.cross_entropy(x_pred, x_true)
+        acc = (torch.argmax(x_pred, dim = -1) == x_true).float().sum()
+        return {'loss': loss, 'accuracy': acc}
 
 
 ######################################
 #  GAN
 ######################################
-
 class Discriminator(nn.Module):
     def __init__(self, img_channel,img_size = 224, nb_channels = 64, drop = 0.2):
         super().__init__()
@@ -171,51 +175,88 @@ class Generator(nn.Module):
         return x
 
 
+#########################################################
+class BaseVAE(nn.Module):
+    def __init__(self, device = 'cuda'):
+        super().__init__()
+    def encoder(self, x):
+        raise NotImplementedError
+    
+    def decoder(self, z):
+        raise NotImplementedError
+    def reparameterization(self, mu, logvar):
+        z = torch.randn_like(mu)
+        std = torch.exp(0.5*logvar)
+        return z*std + mu
 
+    @abc.abstractmethod
+    def forward(self, x, label = None):
+        pass
+
+    @torch.no_grad()
+    def sample(self,nb_images, z = None):
+        device = torch
+        z = torch.randn()
+        raise NotImplementedError
+
+    
 
 # Variational Auto Encoder: https://arxiv.org/abs/1312.6114
 
-class VAE(nn.Module):
-    def __init__(self, img_size, hidden_dim,  latent_dim):
+class VAE_1D(nn.Module):
+    def __init__(self,config, img_shape, nb_classes):
         super().__init__()
-        self.enc_l1 = nn.Linear(img_size ** 2, hidden_dim)
-        self.enc_l2 = nn.Linear(hidden_dim, hidden_dim)
-        self.enc_mu = nn.Linear(hidden_dim, latent_dim)
-        self.enc_sigma = nn.Linear(hidden_dim, latent_dim)
-
-        self.dec_l1 = nn.Linear(latent_dim, hidden_dim)
-        self.dec_l2 = nn.Linear(hidden_dim, img_size**2)
-
+        self.img_shape = img_shape
+        start_dim = img_shape[0]*img_shape[1]*img_shape[2]
+        hidden_dim = copy.deepcopy(config['model']['encoder_dims'])
+        hidden_dim.insert(0, start_dim)
+        latent_dim = config['model']['latent_dim']
+        self.encoder_layers = nn.ModuleList([nn.Sequential(
+            nn.Linear(hidden_dim[i], hidden_dim[i+1]),
+            nn.LeakyReLU()) for i in  range(len(hidden_dim)-1)])
         
+        self.enc_mu = nn.Linear(hidden_dim[-1], latent_dim)
+        self.enc_sigma = nn.Linear(hidden_dim[-1], latent_dim)
+
+        self.decoder_init = nn.Linear(latent_dim, hidden_dim[-1])
+        self.decoder_layer = nn.ModuleList([nn.Sequential(
+            nn.LeakyReLU(),
+            nn.Linear(hidden_dim[i], hidden_dim[i-1])) for i in range(len(hidden_dim)-1, 0, -1)])
+
+                   
     def encoder(self, x):
-        h = F.leaky_relu(self.enc_l1(x), negative_slope=0.2)
-        h = F.leaky_relu(self.enc_l2(h), negative_slope=0.2)
-
-        mu = self.enc_mu(h)
-        logvar = self.enc_sigma(h)
-
+        B = x.shape[0]
+        x = x.view(B, -1)
+        for layer in self.encoder_layers:
+            x = layer(x)
+        
+        mu = self.enc_mu(x)
+        logvar = self.enc_sigma(x)
         return mu, logvar
         
     def decoder(self, z):
-        out = F.leaky_relu(self.dec_l1(z), negative_slope=0.2)
-        out = F.tanh(self.dec_l2(out))
+        out = self.decoder_init(z)
+        for layer in self.decoder_layer:
+            out = layer(out)
+        out = F.tanh(out).view(-1, self.img_shape[0],self.img_shape[1],self.img_shape[2])
+
         return out
 
-    def reparameterization(self, mu, sig):
+    def reparameterize(self, mu, sig):
         eps = torch.randn_like(sig)
         std = torch.sqrt(torch.exp(sig))
         return mu + std*eps
 
-    def forward(self, x):
-        mean, logvar = self.encoder(x)
-        z = self.reparameterization(mean, logvar)
-
+    def forward(self, x, label = None):
+        mu, logvar = self.encoder(x)
+        z = self.reparameterize(mu, logvar)
         x_hat = self.decoder(z)
 
-        return x_hat, mean, logvar
+        return x_hat, mu, logvar
+
 
 # VAE_complex (code below) cannot decode correctly, hence other architecture implementation
-class VAEBlock_other(nn.Module):
+'''class VAEBlock_other(nn.Module):
     def __init__(self,in_channel):
         super().__init__()
         self.block = nn.Sequential(
@@ -226,7 +267,7 @@ class VAEBlock_other(nn.Module):
             nn.LeakyReLU(),
         )
     
-    def forward(self,x):
+    def forward(self,x, label = None):
         out = x + self.block(x)
         return out
 
@@ -296,7 +337,7 @@ class VAE_other(nn.Module):
 
         return out
 
-    def forward(self, x):
+    def forward(self, x, label = None):
         for block in self.blocks_conv:
             x = block(x)
 
@@ -317,9 +358,7 @@ class VAE_other(nn.Module):
             z = torch.randn((nb_images, 512)).to(device)
 
         x_pred = self.decoder(z)
-        return x_pred
-
-
+        return x_pred'''
 
 class VAE_Block(nn.Module):
     def __init__(self,in_channel, out_channel, kernel, stride, last_activ = nn.LeakyReLU()):
@@ -336,7 +375,7 @@ class VAE_Block(nn.Module):
                 nn.BatchNorm2d(out_channel))
         
         self.last_activation = last_activ
-    def forward(self, x):
+    def forward(self, x, label = None):
         if self.downsample is not None:
             resid = self.downsample(x)
         else:
@@ -349,69 +388,74 @@ class VAE_Block(nn.Module):
         return out
 
 class VAE_complex(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, img_shape, nb_classes = None):
         super().__init__()
-        nb_convs = len(config['encoder_kernels'])
-        assert len(config['encoder_strides']) == nb_convs
-        assert len(config['encoder_channels']) == nb_convs
 
-        nb_convT = len(config['decoder_channels'])
+        self.conditionnal = config['model']['conditionnal']
+
+        self.optim_params = config['optimization']
+        self.img_shape = img_shape
+        nb_convs = len(config['model']['encoder_kernels'])
+        assert len(config['model']['encoder_strides']) == nb_convs
+        assert len(config['model']['encoder_channels']) == nb_convs
+
+        nb_convT = len(config['model']['decoder_channels'])
         assert nb_convT <= nb_convs
 
         self.init_conv = nn.Sequential(
-            nn.Conv2d(config['img_channels'], config['encoder_channels'][0], kernel_size = config['encoder_kernels'][0], stride = config['encoder_strides'][0], padding=config['encoder_kernels'][0]//2, bias = False),
-            nn.BatchNorm2d(config['encoder_channels'][0]),
+            nn.Conv2d(self.img_shape[0], config['model']['encoder_channels'][0], kernel_size = config['model']['encoder_kernels'][0], stride = config['model']['encoder_strides'][0], padding=config['model']['encoder_kernels'][0]//2, bias = False),
+            nn.BatchNorm2d(config['model']['encoder_channels'][0]),
             nn.LeakyReLU())
 
-        if config['maxpool_stride']==0:
+        if config['model']['maxpool_stride']==0:
             self.maxpool = nn.Identity()
         else:
-            self.maxpool = nn.MaxPool2d(kernel_size=3, stride = config['maxpool_stride'], padding = 1)
+            self.maxpool = nn.MaxPool2d(kernel_size=3, stride = config['model']['maxpool_stride'], padding = 1)
         
         self.encoder_blocks = nn.ModuleList()
         for i in range(1, nb_convs):
-            self.encoder_blocks.append(VAE_Block(config['encoder_channels'][i-1], config['encoder_channels'][i], config['encoder_kernels'][i], config['encoder_strides'][i]))
+            self.encoder_blocks.append(VAE_Block(config['model']['encoder_channels'][i-1], config['model']['encoder_channels'][i], config['model']['encoder_kernels'][i], config['model']['encoder_strides'][i]))
 
-            for j in range(1, config['encoder_size_blocks']):
-                self.encoder_blocks.append(VAE_Block(config['encoder_channels'][i], config['encoder_channels'][i], config['encoder_kernels'][i], stride = 1))
+            for j in range(1, config['model']['encoder_size_blocks']):
+                self.encoder_blocks.append(VAE_Block(config['model']['encoder_channels'][i], config['model']['encoder_channels'][i], config['model']['encoder_kernels'][i], stride = 1))
         sizes_history = []
-        img_size_out = config['img_size']
+        img_size_out = img_shape[1]
         sizes_history.append(img_size_out)
         for i in range(nb_convs):
-            img_size_out = (img_size_out - config['encoder_kernels'][i] +2 * (config['encoder_kernels'][i]//2))// config['encoder_strides'][i] + 1
+            img_size_out = (img_size_out - config['model']['encoder_kernels'][i] +2 * (config['model']['encoder_kernels'][i]//2))// config['model']['encoder_strides'][i] + 1
             sizes_history.append(img_size_out)
-            if (i == 0) & (config['maxpool_stride']>1):
-                img_size_out = (img_size_out - 3 + 2)//config['maxpool_stride'] + 1
+            if (i == 0) & (config['model']['maxpool_stride']>1):
+                img_size_out = (img_size_out - 3 + 2)//config['model']['maxpool_stride'] + 1
                 sizes_history.append(img_size_out)
 
         self.img_sizes_hist = sizes_history
 
         # reduce image to size with height and width: 1 x 1
-        if config['avgpool']:
+        if config['model']['avgpool']:
             self.encoder_avgpool = nn.AvgPool2d(kernel_size = img_size_out, stride = 1)
-            mlp_size = config['encoder_channels'][-1]
+            mlp_size = config['model']['encoder_channels'][-1]
         else:
             self.encoder_avgpool = nn.Identity()
-            mlp_size = config['encoder_channels'][-1]*self.img_sizes_hist[-1]**2
+            mlp_size = config['model']['encoder_channels'][-1]*self.img_sizes_hist[-1]**2
         
         self.mlp = nn.Linear(mlp_size, mlp_size)
 
         self.mlp_mu = nn.Sequential(
             nn.Linear(mlp_size, mlp_size),
             nn.LeakyReLU(),
-            nn.Linear(mlp_size, config['latent_dim']))
+            nn.Linear(mlp_size, config['model']['latent_dim']))
 
         self.mlp_logvar = nn.Sequential(
             nn.Linear(mlp_size, mlp_size),
             nn.LeakyReLU(),
-            nn.Linear(mlp_size, config['latent_dim']))
+            nn.Linear(mlp_size, config['model']['latent_dim']))
 
         # Decoder
         
-        nb_convT = len(config['decoder_channels'])
+        nb_convT = len(config['model']['decoder_channels'])
         self.decoder_output_pad = []
 
-        in_size = config['img_size']
+        in_size = img_shape[1]
         # Compute size of the necessary last linear layer before ConvTranspose in decoder to ensure output has same size as data
         for _ in range(nb_convT):
             if in_size % 2 == 0:
@@ -425,12 +469,12 @@ class VAE_complex(nn.Module):
     
 
         self.start_img_size = in_size
-        self.latent_dim = config['latent_dim']
+        self.latent_dim = config['model']['latent_dim']
 
         self.mlp_decoder = nn.Sequential(
             nn.Linear(self.latent_dim,self.latent_dim),
             nn.LeakyReLU(),
-            nn.Linear(self.latent_dim, self.start_img_size**2*config['decoder_channels'][0]),
+            nn.Linear(self.latent_dim, self.start_img_size**2*config['model']['decoder_channels'][0]),
             nn.LeakyReLU()
         )
 
@@ -438,19 +482,19 @@ class VAE_complex(nn.Module):
         for i in range(nb_convT):
             if i == nb_convT -1:
                 self.convT_layers.append(nn.Sequential(
-                    nn.ConvTranspose2d(config['decoder_channels'][i], config['img_channels'], 3, stride = 2, padding = 1, output_padding=self.decoder_output_pad[i])))
+                    nn.ConvTranspose2d(config['model']['decoder_channels'][i], self.img_shape[0], 3, stride = 2, padding = 1, output_padding=self.decoder_output_pad[i])))
             else:
                 self.convT_layers.append(nn.Sequential(
-                    nn.ConvTranspose2d(config['decoder_channels'][i], config['decoder_channels'][i+1], 3, stride = 2, padding = 1, output_padding=self.decoder_output_pad[i]),
+                    nn.ConvTranspose2d(config['model']['decoder_channels'][i], config['model']['decoder_channels'][i+1], 3, stride = 2, padding = 1, output_padding=self.decoder_output_pad[i]),
                     nn.LeakyReLU()
                 ))
 
         self.convT_layers = nn.Sequential(*self.convT_layers)
-        if config['decoder_nb_blockconvs'] == 0:
+        if config['model']['decoder_nb_blockconvs'] == 0:
             self.decoder_blockconvs = nn.ModuleList([nn.Tanh()])    
         else:
-            self.decoder_blockconvs = nn.ModuleList([VAE_Block(config['img_channels'],config['img_channels'] ,kernel=3, stride = 1)  for _ in range(config['decoder_nb_blockconvs']-1)])
-            self.decoder_blockconvs.append(VAE_Block(config['img_channels'],config['img_channels'] ,kernel=3, stride = 1, last_activ=nn.Tanh()))
+            self.decoder_blockconvs = nn.ModuleList([VAE_Block(self.img_shape[0],self.img_shape[0] ,kernel=3, stride = 1)  for _ in range(config['model']['decoder_nb_blockconvs']-1)])
+            self.decoder_blockconvs.append(VAE_Block(self.img_shape[0],self.img_shape[0], kernel=3, stride = 1, last_activ=nn.Tanh()))
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
@@ -464,17 +508,7 @@ class VAE_complex(nn.Module):
         std = torch.exp(0.5*logvar)
         return mu + std* eps1
 
-    def decoder(self,x):
-        B = x.shape[0]
-        x = self.mlp_decoder(x)
-
-        x = x.view(B,-1,self.start_img_size,self.start_img_size )
-        x = self.convT_layers(x)
-        for block in self.decoder_blockconvs:
-            x = block(x)
-        return x
-
-    def forward(self, x):
+    def encoder(self, x):
         B = x.shape[0]
         x = self.init_conv(x)
         x = self.maxpool(x)
@@ -486,11 +520,39 @@ class VAE_complex(nn.Module):
 
         mu = self.mlp_mu(x_encoded)
         logvar = self.mlp_logvar(x_encoded)
+        return mu, logvar
+
+    def decoder(self,x, label = None):
+        B = x.shape[0]
+        x = self.mlp_decoder(x)
+
+        x = x.view(B,-1,self.start_img_size,self.start_img_size )
+        x = self.convT_layers(x)
+        for block in self.decoder_blockconvs:
+            x = block(x)
+        return x
+
+    def forward(self, x, label = None):
+        B = x.shape[0]
+        mu, logvar = self.encoder(x)
 
         z = self.reparameterize(mu, logvar)
         x_hat = self.decoder(z)
         
         return x_hat, mu, logvar
+
+    def loss_function(self, x_out, x_true, unnormalize = None):
+        try:
+            reduc =  self.optim_params['reduction']
+        except:
+            reduc = 'mean' 
+        if self.optim_params['criterion'] == 'bce':
+            loss_mse = F.binary_cross_entropy(unnormalize(x_out[0]), unnormalize(x_true), reduction = reduc)
+        else:
+            loss_mse = F.mse_loss(x_out[0], x_true, reduction=reduc)
+        loss_kl = ELBO_gaussian(x_out[1], x_out[2])
+        loss = loss_mse + self.optim_params['kl_weight']*loss_kl
+        return {'loss':loss, 'recon_loss':loss_mse, 'kl_loss':loss_kl}
 
     @torch.no_grad()
     def sample(self, nb_images, z = None):            
@@ -501,22 +563,68 @@ class VAE_complex(nn.Module):
         x_pred = self.decoder(z)
         return x_pred
 
+    def eval_manifold(self, nb_points = 900):
+        assert nb_points == int(math.sqrt(nb_points)**2)
+
+        list_grids = []
+        if self.conditionnal:
+            range_class = self.nb_classes
+        else:
+            range_class = 1
+        
+        for label_val in range(range_class):
+
+            grid_side = int(math.sqrt(nb_points))
+            xs = torch.linspace(-10,10,grid_side)
+            ys = torch.linspace(-10,10,grid_side)
+
+            xs, ys = torch.meshgrid([xs,ys])
+            xs = xs.reshape(-1,1)
+            ys = ys.reshape(-1,1)
+            device = self.init_conv[0].weight.device
+            zs = torch.cat([xs,ys], dim = -1).to(device)
+
+            labels = torch.ones(nb_points,).to(device).long()* label_val
+            generated_img = self.decoder(zs, labels)
+            generated_img = ((generated_img.cpu() + 1)/2)
+            grid = torchvision.utils.make_grid(generated_img, nrow = grid_side)
+            list_grids.append(grid)
+
+        if self.conditionnal:
+            return list_grids
+
+        return grid
 
 
 class MultiStage_VAE(nn.Module):
-    def __init__(self, config, size_second_stage):
+    def __init__(self, config, img_shape, nb_classes):
         super().__init__()
+        self.img_shape = img_shape
+        self.optim_params = config['optimization']
         self.config = config
-        self.vae = VAE_complex(self.config)
-
-        self.second_stage = nn.ModuleList([VAE_Block(config['img_channels'], config['img_channels'],kernel=3, stride=1) for _ in range(size_second_stage-1)])
-        self.second_stage.append(VAE_Block(config['img_channels'], config['img_channels'],kernel=3, stride=1, last_activ = nn.Tanh()))
+        self.vae = VAE_complex(self.config, img_shape, nb_classes)
+        self.latent_dim = self.vae.latent_dim
+        size_second_stage = self.config['model']['size_second_stage']
+        self.second_stage = nn.ModuleList([VAE_Block(img_shape[0], img_shape[0],kernel=3, stride=1) for _ in range(size_second_stage-1)])
+        self.second_stage.append(VAE_Block(img_shape[0], img_shape[0],kernel=3, stride=1, last_activ = nn.Tanh()))
         self.second_stage = nn.Sequential(*self.second_stage)
-    def forward(self,x):
+    
+    def encoder(self, x):
+        return self.vae.encoder(x)
+
+    def forward(self,x, label = None):
         x_first, mu, logvar = self.vae(x)
-        out = self.second_stage(x_first)
+        x_coarse = x_first
+        x_coarse = x_coarse.detach()
+        out = self.second_stage(x_coarse)
 
         return out, x_first, mu, logvar
+    
+    def reparameterize(self, mu, logvar):
+        return self.vae.reparameterize(mu, logvar)
+    def decoder(self, x):
+        x = self.vae.decoder(x)
+        return self.second_stage(x)
 
     @torch.no_grad()
     def sample(self, nb_images, z = None):            
@@ -527,37 +635,57 @@ class MultiStage_VAE(nn.Module):
         x_first = self.vae.decoder(z)
         x_pred = self.second_stage(x_first)
         return x_pred
+    
+    def loss_function(self, x_out, x_true, unnormalize):
+        try:
+            reduc =  self.optim_params['reduction']
+        except:
+            reduc = 'mean' 
+        if self.optim_params['criterion'] == 'bce':
+            loss_mse = F.binary_cross_entropy(unnormalize(x_out[0]), unnormalize(x_true), reduction = reduc)
+        else:
+            loss_mse = F.mse_loss(x_out[0], x_true, reduction=reduc)
+
+        loss_l1 = F.l1_loss(x_out[1], x_true, reduction = reduc)
+        loss_kl = ELBO_gaussian(x_out[2], x_out[3])
+        loss = loss_mse + self.optim_params['kl_weight']*loss_kl + loss_l1
+        return {'loss':loss, 'recon_loss':loss_mse, 'kl_loss':loss_kl, 'l1__loss': loss_l1}
+
 
 
 # Simple model, interesting for MNIST dataset especially the manifold function for 2-dimensional latent space. 
 class VAE_3D(nn.Module):
-    def __init__(self, config):
-        super().__init__()
+    def __init__(self, config, img_shape, nb_classes = None):
+        super(VAE_3D, self).__init__()
+        self.optim_params = config['optimization']
+        self.img_channels = img_shape[0]
+        self.img_size = img_shape[1]
+        self.config = copy.deepcopy(config['model'])
 
-        assert len(config['encoder_kernels']) == len(config['encoder_strides'])
-        assert len(config['encoder_kernels']) == len(config['encoder_channels'])
+        assert len(self.config['encoder_kernels']) == len(self.config['encoder_strides'])
+        assert len(self.config['encoder_kernels']) == len(self.config['encoder_channels'])
 
-        self.nb_classes = config['nb_classes']
-        nb_convs = len(config['encoder_kernels'])
+        self.nb_classes = nb_classes
+        nb_convs = len(self.config['encoder_kernels'])
 
-        self.conditionnal = config['conditionnal']
+        self.conditionnal = self.config['conditionnal']
 
-        if 'encoder_pad' in config:
-            self.pad = config['encoder_pad']
+        if 'encoder_pad' in self.config:
+            self.pad = self.config['encoder_pad']
         else:
-            self.pad = [s//2 if s%2 == 1 else 0 for s in config['encoder_kernels']]
+            self.pad = [s//2 if s%2 == 1 else 0 for s in self.config['encoder_kernels']]
 
-        self.nb_channels = copy.deepcopy(config['encoder_channels'])
-        self.nb_channels.insert(0, config['img_channels'])
+        self.nb_channels = copy.deepcopy(self.config['encoder_channels'])
+        self.nb_channels.insert(0, self.img_channels)
 
-        enc_mlp_dims = config['encoder_mlp_dims']
-        self.latent_dim = config['encoder_mlp_dims'][-1]
+        enc_mlp_dims = self.config['encoder_mlp_dims']
+        self.latent_dim = self.config['encoder_mlp_dims'][-1]
 
-        curr_size = config['img_size']
+        curr_size = self.img_size
         sizes_hist = []
         sizes_hist.append(curr_size)
-        for i in range(len(config['encoder_kernels'])):
-            curr_size = (curr_size- config['encoder_kernels'][i] + 2 * self.pad[i])//config['encoder_strides'][i] + 1
+        for i in range(len(self.config['encoder_kernels'])):
+            curr_size = (curr_size- self.config['encoder_kernels'][i] + 2 * self.pad[i])//self.config['encoder_strides'][i] + 1
             sizes_hist.append(curr_size)
 
         reverse_sizes_hist = sizes_hist[::-1]
@@ -565,8 +693,10 @@ class VAE_3D(nn.Module):
         enc_mlp_dims.insert(0, enc_flat_dim)
         dec_mlp_dims = enc_mlp_dims[::-1]
 
-        self.output_pad = [0 if (reverse_sizes_hist[i+1] - config['encoder_kernels'][-(i+1)]+ 2* self.pad[-(i+1)]) % config['encoder_strides'][-(i+1)] == 0 else 1 for i in range(nb_convs) ]
-        self.dec_kernels = config['encoder_kernels'][::-1]
+        self.sizes_hist = sizes_hist
+
+        self.output_pad = [0 if (reverse_sizes_hist[i+1] - self.config['encoder_kernels'][-(i+1)]+ 2* self.pad[-(i+1)]) % self.config['encoder_strides'][-(i+1)] == 0 else 1 for i in range(nb_convs) ]
+        self.dec_kernels = self.config['encoder_kernels'][::-1]
 
 
         if self.conditionnal:
@@ -574,31 +704,30 @@ class VAE_3D(nn.Module):
             dec_mlp_dims[0] += self.nb_classes
         
         for i in range(len(self.dec_kernels)):
-            if reverse_sizes_hist[i+1] != (reverse_sizes_hist[i]-1)*config['encoder_strides'][-i-1]-2*self.pad[-i-1] + self.dec_kernels[i] + self.output_pad[i]:
+            if reverse_sizes_hist[i+1] != (reverse_sizes_hist[i]-1)*self.config['encoder_strides'][-i-1]-2*self.pad[-i-1] + self.dec_kernels[i] + self.output_pad[i]:
                 self.dec_kernels[i] += 1
-                self.output_pad[i] = 0 if (reverse_sizes_hist[i+1] - self.dec_kernels[i]+ 2* self.pad[-(i+1)]) % config['encoder_strides'][-(i+1)] == 0 else 1
+                self.output_pad[i] = 0 if (reverse_sizes_hist[i+1] - self.dec_kernels[i]+ 2* self.pad[-(i+1)]) % self.config['encoder_strides'][-(i+1)] == 0 else 1
         
-        self.enc_convs = nn.ModuleList([nn.Sequential(nn.Conv2d(self.nb_channels[i], self.nb_channels[i+1], kernel_size=config['encoder_kernels'][i], stride=config['encoder_strides'][i], padding = self.pad[i]),
+        self.enc_convs = nn.ModuleList([nn.Sequential(nn.Conv2d(self.nb_channels[i], self.nb_channels[i+1], kernel_size=self.config['encoder_kernels'][i], stride=self.config['encoder_strides'][i], padding = self.pad[i]),
                                         nn.BatchNorm2d(self.nb_channels[i+1]),
-                                        activation_dict[config['encoder_activation']]) for i in range(nb_convs)])
+                                        activation_dict[self.config['encoder_activation']]) for i in range(nb_convs)])
 
 
-        self.mlp_mu = nn.ModuleList([nn.Sequential(nn.Linear(enc_mlp_dims[i], enc_mlp_dims[i+1]), activation_dict[config['encoder_mlp_activation']]) for i in range(len(enc_mlp_dims)-1)])
-        self.mlp_logvar = nn.ModuleList([nn.Sequential(nn.Linear(enc_mlp_dims[i], enc_mlp_dims[i+1]), activation_dict[config['encoder_mlp_activation']]) for i in range(len(enc_mlp_dims)-1)])
+        self.mlp_mu = nn.ModuleList([nn.Sequential(nn.Linear(enc_mlp_dims[i], enc_mlp_dims[i+1]), activation_dict[self.config['encoder_mlp_activation']] if i<len(enc_mlp_dims)-2 else nn.Identity()) for i in range(len(enc_mlp_dims)-1)])
+        self.mlp_logvar = nn.ModuleList([nn.Sequential(nn.Linear(enc_mlp_dims[i], enc_mlp_dims[i+1]), activation_dict[self.config['encoder_mlp_activation']] if i<len(enc_mlp_dims)-2 else nn.Identity()) for i in range(len(enc_mlp_dims)-1)])
         
         if self.conditionnal:
             self.nb_channels[0] -= self.nb_classes
         self.dec_convs = nn.ModuleList([nn.Sequential(
-                                            nn.ConvTranspose2d(self.nb_channels[-i-1], self.nb_channels[-i-2], kernel_size=self.dec_kernels[i],stride=config['encoder_strides'][-i-1], padding=self.pad[-i-1], output_padding=self.output_pad[i]),
-                                        nn.Tanh() if i == nb_convs-1 else activation_dict[config['decoder_activation']]) for i in range(nb_convs)])
+                                            nn.ConvTranspose2d(self.nb_channels[-i-1], self.nb_channels[-i-2], kernel_size=self.dec_kernels[i],stride=self.config['encoder_strides'][-i-1], padding=self.pad[-i-1], output_padding=self.output_pad[i]),
+                                            nn.BatchNorm2d(self.nb_channels[-i-2]),
+                                        nn.Tanh() if i == nb_convs-1 else activation_dict[self.config['decoder_activation']]) for i in range(nb_convs)])
 
         #Ensure last activation leads to values in [0,1] 
-        self.dec_mlp = nn.ModuleList([nn.Sequential(nn.Linear(dec_mlp_dims[i], dec_mlp_dims[i+1]), activation_dict[config['decoder_mlp_activation']] ) for i in range(len(dec_mlp_dims)-1)])
-        
+        self.dec_mlp = nn.ModuleList([nn.Sequential(nn.Linear(dec_mlp_dims[i], dec_mlp_dims[i+1]), activation_dict[self.config['decoder_mlp_activation']] ) for i in range(len(dec_mlp_dims)-1)])
         
     def reparameterize(self, mu, logvar):
         eps1 = torch.randn_like(logvar)
-        eps2 = torch.randn_like(logvar)
         std = torch.exp(0.5*logvar)
         return mu + std* eps1
 
@@ -619,9 +748,7 @@ class VAE_3D(nn.Module):
             x_hat= conv(x_hat)
         
         return x_hat
-
-
-    def forward(self, x, label = None):
+    def encoder(self, x, label = None):
         b = x.shape[0]
 
         if self.conditionnal:
@@ -645,12 +772,32 @@ class VAE_3D(nn.Module):
 
         for fc in self.mlp_logvar:
             logvar = fc(logvar)
-        
+        return mu, logvar
+
+    def forward(self, x, label = None):
+        b = x.shape[0]
+
+        mu, logvar = self.encoder(x,label)
+                
         z = self.reparameterize(mu, logvar)
 
         x_hat = self.decoder(z)
 
         return x_hat, mu, logvar
+
+    def loss_function(self, x_out, x_true, unnormalize = None):
+        try:
+            reduc =  self.optim_params['reduction']
+        except:
+            reduc = 'mean' 
+        if self.optim_params['criterion'] == 'bce':
+            loss_mse = F.binary_cross_entropy(unnormalize(x_out[0]), unnormalize(x_true), reduction = reduc)
+        else:
+            loss_mse = F.mse_loss(x_out[0], x_true, reduction=reduc)
+        loss_kl = ELBO_gaussian(x_out[1], x_out[2])
+        loss = loss_mse + self.optim_params['kl_weight']*loss_kl
+        return {'loss':loss, 'recon_loss':loss_mse, 'kl_loss':loss_kl}
+
 
     @torch.no_grad()
     def sample(self, nb_images, z = None, label = None):            
@@ -699,10 +846,10 @@ class VAE_3D(nn.Module):
 class Quantizer(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.embedding = nn.Embedding(config['size_codebook'],config['latent_dim'])
+        self.embedding = nn.Embedding(config['model']['size_codebook'],config['model']['latent_dim'])
 
     
-    def forward(self, x):
+    def forward(self, x, label = None):
         B, C, H, W = x.shape
         x = x.permute(0,2,3,1)
         x = x.reshape(x.size(0), -1, x.size(-1))
@@ -728,51 +875,64 @@ class Quantizer(nn.Module):
         return quantized_idx
 
 class  VQ_VAE(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, img_shape, nb_classes):
         super().__init__()
-        self.nb_convs = len(config['encoder_kernels'])
+        self.nb_convs = len(config['model']['encoder_kernels'])
+        self.optim_params = config['optimization']
+        self.latent_dim = config['model']['latent_dim']
+        self.size_codebook = config['model']['size_codebook']
 
-        assert len(config['encoder_strides']) == self.nb_convs
-        assert len(config['encoder_channels']) == self.nb_convs
+        self.img_shape = img_shape
+        self.nb_classes = nb_classes
+        assert len(config['model']['encoder_strides']) == self.nb_convs
+        assert len(config['model']['encoder_channels']) == self.nb_convs
 
-        nb_channels = copy.deepcopy(config['encoder_channels'])
-        nb_channels.insert(0, config['img_channels'])
+        nb_channels = copy.deepcopy(config['model']['encoder_channels'])
+        nb_channels.insert(0, self.img_shape[0])
     
-        self.pad = [config['encoder_kernels'][i]//2 if config['encoder_kernels'][i]%2 != 0 else 0 for i in range(self.nb_convs)]
+        self.pad = [config['model']['encoder_kernels'][i]//2 if config['model']['encoder_kernels'][i]%2 != 0 else 0 for i in range(self.nb_convs)]
         sizes_hist = []
-        sizes_hist.append(config['img_size'])
+        sizes_hist.append(self.img_shape[1])
         for i in range(self.nb_convs):
-            sizes_hist.append((sizes_hist[-1]-config['encoder_kernels'][i]+2*self.pad[i])//config['encoder_strides'][i] + 1)
+            sizes_hist.append((sizes_hist[-1]-config['model']['encoder_kernels'][i]+2*self.pad[i])//config['model']['encoder_strides'][i] + 1)
 
         self.out_encoder_size = sizes_hist[-1]
 
         reverse_sizes_hist = sizes_hist[::-1]
 
-        self.output_pad = [0 if (reverse_sizes_hist[i+1] - config['encoder_kernels'][-(i+1)]+ 2* self.pad[-(i+1)]) % config['encoder_strides'][-(i+1)] == 0 else 1 for i in range(self.nb_convs)]
+        self.output_pad = [0 if (reverse_sizes_hist[i+1] - config['model']['encoder_kernels'][-(i+1)]+ 2* self.pad[-(i+1)]) % config['model']['encoder_strides'][-(i+1)] == 0 else 1 for i in range(self.nb_convs)]
 
         
-        self.enc_convs = nn.ModuleList([nn.Sequential(nn.Conv2d(nb_channels[i], nb_channels[i+1], kernel_size=config['encoder_kernels'][i], stride=config['encoder_strides'][i], padding=self.pad[i]),
+        self.enc_convs = nn.ModuleList([nn.Sequential(nn.Conv2d(nb_channels[i], nb_channels[i+1], kernel_size=config['model']['encoder_kernels'][i], stride=config['model']['encoder_strides'][i], padding=self.pad[i]),
                                                     nn.BatchNorm2d(nb_channels[i+1]),
-                                                    activation_dict[config['encoder_activation']]) for i in range(self.nb_convs-1)])
+                                                    activation_dict[config['model']['encoder_activation']]) for i in range(self.nb_convs-1)])
         
-        self.enc_convs.append(nn.Conv2d(nb_channels[-2], nb_channels[-1], kernel_size=config['encoder_kernels'][-1],stride = config['encoder_strides'][-1], padding=self.pad[-1]))
+        self.enc_convs.append(nn.Conv2d(nb_channels[-2], nb_channels[-1], kernel_size=config['model']['encoder_kernels'][-1],stride = config['model']['encoder_strides'][-1], padding=self.pad[-1]))
             
-        self.dec_kernels = copy.deepcopy(config['encoder_kernels'][::-1])
+        self.dec_kernels = copy.deepcopy(config['model']['encoder_kernels'][::-1])
         for i in range(len(self.dec_kernels)):
-            if reverse_sizes_hist[i+1] != (reverse_sizes_hist[i]-1)*config['encoder_strides'][-i-1]-2*self.pad[-i-1] + self.dec_kernels[i] + self.output_pad[i]:
+            if reverse_sizes_hist[i+1] != (reverse_sizes_hist[i]-1)*config['model']['encoder_strides'][-i-1]-2*self.pad[-i-1] + self.dec_kernels[i] + self.output_pad[i]:
                 self.dec_kernels[i] += 1
-                self.output_pad[i] = 0 if (reverse_sizes_hist[i+1] - self.dec_kernels[i]+ 2* self.pad[-(i+1)]) % config['encoder_strides'][-(i+1)] == 0 else 1
+                self.output_pad[i] = 0 if (reverse_sizes_hist[i+1] - self.dec_kernels[i]+ 2* self.pad[-(i+1)]) % config['model']['encoder_strides'][-(i+1)] == 0 else 1
 
-        self.dec_convs = nn.ModuleList([nn.Sequential(nn.ConvTranspose2d(nb_channels[-i-1], nb_channels[-i-2], kernel_size=self.dec_kernels[i], stride=config['encoder_strides'][-i-1], padding=self.pad[-i-1], output_padding=self.output_pad[i]),
+        self.dec_convs = nn.ModuleList([nn.Sequential(nn.ConvTranspose2d(nb_channels[-i-1], nb_channels[-i-2], kernel_size=self.dec_kernels[i], stride=config['model']['encoder_strides'][-i-1], padding=self.pad[-i-1], output_padding=self.output_pad[i]),
                                                     nn.BatchNorm2d(nb_channels[-i-2]),
-                                                    activation_dict[config['decoder_activation']]) for i in range(self.nb_convs - 1)])
+                                                    activation_dict[config['model']['decoder_activation']]) for i in range(self.nb_convs - 1)])
 
-        self.dec_convs.append(nn.Sequential(nn.ConvTranspose2d(nb_channels[1], nb_channels[0], kernel_size=self.dec_kernels[-1], stride=config['encoder_strides'][0], padding=self.pad[0], output_padding=self.output_pad[-1]),nn.Tanh()))
+        self.dec_convs.append(nn.Sequential(nn.ConvTranspose2d(nb_channels[1], nb_channels[0], kernel_size=self.dec_kernels[-1], stride=config['model']['encoder_strides'][0], padding=self.pad[0], output_padding=self.output_pad[-1]),nn.Tanh()))
 
 
-        self.pre_conv_quant = nn.Conv2d(nb_channels[-1], config['latent_dim'], kernel_size=1)
-        self.post_conv_quant = nn.Conv2d(config['latent_dim'], nb_channels[-1], kernel_size = 1)
+        self.pre_conv_quant = nn.Conv2d(nb_channels[-1], self.latent_dim, kernel_size=1)
+        self.post_conv_quant = nn.Conv2d(self.latent_dim, nb_channels[-1], kernel_size = 1)
         self.quantizer = Quantizer(config)
+
+
+        self.latent_generator = self.configure_latent_model(config['latent_generator'])
+
+    def configure_latent_model(self, config):
+        dict_latent_models = {'LSTM': LSTM_VQVAE, 'PixelCNN': PixelCNN_VQVAE}
+        assert config['model']['name'] in dict_latent_models
+        return dict_latent_models[config['model']['name']](config, (1, self.out_encoder_size, self.out_encoder_size), self.size_codebook)
 
     def encoder(self, x):
         for conv in self.enc_convs:
@@ -785,7 +945,7 @@ class  VQ_VAE(nn.Module):
             z = convT(z)
         return z
 
-    def forward(self, x):
+    def forward(self, x, label = None):
         enc_out = self.encoder(x)
         enc_out = self.pre_conv_quant(enc_out)
 
@@ -794,6 +954,31 @@ class  VQ_VAE(nn.Module):
         out = self.decoder(quant_out)
         return out, loss_embed, loss_commitment, quantized_idx
 
+    def loss_function(self, x_out, x_true, unnormalize = None):
+        try:
+            reduc =  self.optim_params['reduction']
+        except:
+            reduc = 'mean' 
+        if self.optim_params['criterion'] == 'bce':
+            loss_mse = F.binary_cross_entropy(unnormalize(x_out[0]), unnormalize(x_true), reduction = reduc)
+        else:
+            loss_mse = F.mse_loss(x_out[0], x_true, reduction=reduc)
+
+        loss_commitment = x_out[2]
+        loss_embed = x_out[1]
+        loss = loss_mse + self.optim_params['commitment_weight']*loss_commitment + loss_embed
+        return {'loss':loss, 'recon_loss':loss_mse, 'commitment_loss':loss_commitment, 'embed_loss': loss_embed}
+
+    @torch.no_grad()
+    def sample(self, nb_images, z = None, label = None):            
+        if z is None:
+            device = self.enc_convs[0][0].bias.device
+            z = self.latent_generator.generate(nb_images)
+
+        embedded_batch = self.quantizer.embedding(z.long().squeeze(1)).permute(0,3,1,2)
+        x_pred = self.decoder(self.post_conv_quant(embedded_batch))
+        
+        return x_pred
 
 class LSTM_VQVAE(nn.Module):
     def __init__(self, config, hidden_dim = 256, nb_layers = 3):
@@ -804,7 +989,7 @@ class LSTM_VQVAE(nn.Module):
         self.mlp = nn.Sequential(nn.Linear(hidden_dim, hidden_dim//4), nn.ReLU(), nn.Linear(hidden_dim//4, self.size_codebook))
         self.word_embedding = nn.Embedding(self.size_codebook + 2, self.latent_dim)
 
-    def forward(self,x ):
+    def forward(self,x , label = None):
         x = self.word_embedding(x)
         out, _= self.lstm(x)
         out = out[:,-1,:]
@@ -897,15 +1082,18 @@ class PixelCNN(nn.Module):
 
 
 class PixelCNN_VQVAE(nn.Module):
-    def __init__(self, config,nb_layers = 12, channel_dim = 32):
+    def __init__(self, config, img_shape,nb_classes):
         super().__init__()
-        self.size_codebook = config['size_codebook']
-
+        self.config = config
+        self.size_codebook = nb_classes
+        self.img_shape = img_shape
+        nb_layers = config['model']['nb_layers']
+        channel_dim = config['model']['channel_dim']
         kernels = [3 if i>0 else 7 for i in range(nb_layers)]
         masks = ['B' if i>0 else 'A' for i in range(nb_layers)]
 
         channels = [channel_dim] * nb_layers
-        channels.insert(0, 1)
+        channels.insert(0, img_shape[0])
         self.convs = nn.ModuleList()
 
         for i in range(nb_layers):
@@ -924,11 +1112,23 @@ class PixelCNN_VQVAE(nn.Module):
         out = self.conv_out(x)
         return out
 
+    def loss_function(self, x_out, x_true, unnormalize = None):
+        try:
+            criterion = self.config['optimization']['criterion']
+        except:
+            criterion = 'mse'
+        if criterion == 'cross_entropy':
+            loss = F.cross_entropy(x_out, x_true.long().squeeze(1))
+        else:
+            loss = F.mse_loss(x_out, x_true)
+        return {'loss':loss}
+        
+        
     @torch.no_grad()
-    def generate(self, nb_samples, img_size):
-        img = torch.zeros(nb_samples,1,  img_size, img_size).to(self.conv_out.bias.device)
-        for i in range(img_size):
-            for j in range(img_size):
+    def generate(self, nb_samples):
+        img = torch.zeros(nb_samples,self.img_shape[0],  self.img_shape[1], self.img_shape[2]).to(self.conv_out.bias.device)
+        for i in range(self.img_shape[1]):
+            for j in range(self.img_shape[2]):
                 logits = self(img)
                 probs = F.softmax(logits, dim = 1)
 

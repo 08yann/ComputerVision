@@ -1,0 +1,13 @@
+model parameters:
+  img_channels: 3
+  img_size: 256
+  encoder_kernels: [7,3,3,3,3]
+  encoder_strides: [2,1,2,2,2]
+  maxpool_stride: 2
+  avgpool: True
+  encoder_size_blocks: 2
+  encoder_channels: [64,64,128,256,512]
+  latent_dim: 500
+  decoder_channels: [32,64,32,16]
+  decoder_nb_blockconvs: 3
+

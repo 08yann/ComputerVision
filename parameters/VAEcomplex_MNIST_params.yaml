@@ -1,0 +1,27 @@
+dataset:
+  name: 'MNIST'
+  batch_size: 64
+  img_size: 28
+  mean: 0.5
+  std: 0.5
+model:
+  name: 'VAE_complex'
+  img_channels: 1
+  img_size: 28
+  encoder_kernels: [7,3]
+  encoder_strides: [2,2]
+  maxpool_stride: 2
+  avgpool: False
+  encoder_size_blocks: 2
+  encoder_channels: [32,64]
+  latent_dim: 2
+  decoder_channels: [64, 32]
+  decoder_nb_blockconvs: 0
+  conditionnal: False
+optimization:
+  lr: 0.001
+  kl_weight:  1
+  criterion: 'bce'
+  reduction: 'sum'
+  epochs: 20
+  weight_decay: 0

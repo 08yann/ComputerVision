@@ -1,0 +1,15 @@
+dataset:
+  name: # dataset from MNIST, colorMNIST, CelebA, 
+  batch_size: 
+  img_size: #Size of images, used to resize images 
+model:
+  name: 
+  nb_channels: 
+  nb_blocks: 
+  size_block: 
+  maxpool:
+  #other parameters depending on the models
+optimization:
+# parameters for training
+  lr: 
+  epochs: 
