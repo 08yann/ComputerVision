@@ -288,39 +288,30 @@ def training_steps(model, dataloader, unnormalize = None, classification = False
     losses = []
     optimizer = configure_optimizer(model)
     loss_idx = 0
+    loss_dict = {}
     for e in range(model.optim_params['epochs']):
         pbar = tqdm.tqdm(dataloader)
-        
         for x, label in pbar:
-            
-            out = model(x.to(device), label.to(device))
-            loss_dict = model.loss_function(out, label.to(device)) if classification else model.loss_function(out, x.to(device),unnormalize)
+            if type(optimizer) == list:
+                x = x.to(device)
+                loss_discriminator, loss_generator = model.gan_step(optimizer, x)
+                pbar.set_description(f'GAN epoch: %.3f Loss D: %.3f Loss G: %.3f' % (e,loss_discriminator, loss_generator))
 
-            if 'loss_discriminator' in loss_dict:
-                loss = loss['loss_discriminator']
-                loss.backward()
-                loss.s
-                optimizer[0].step()
-                optimizer[0].zero_grad()
-
-                loss = loss['loss_generator']
-                loss.backward()
-                optimizer[1].step()
-                optimizer[1].zero_grad()
-
-
-            
             else:
+                out = model(x.to(device), label.to(device))
+                loss_dict = model.loss_function(out, label.to(device)) if classification else model.loss_function(out, x.to(device),unnormalize)
+                
                 loss = loss_dict['loss']
                 loss.backward()
                 optimizer.step()
                 optimizer.zero_grad()
                 losses.append(loss.item())
+                pbar.set_description(f'VAE epoch: %.3f Loss: %.3f' % (e,loss))
 
-            if logger is not None:
-                logger.add_scalar('loss',loss.item(), loss_idx)
-                loss_idx += 1
-            pbar.set_description(f'VAE epoch: %.3f Loss: %.3f' % (e,loss))
+                if logger is not None:
+                    logger.add_scalar('loss',loss.item(), loss_idx)
+                    loss_idx += 1
+            
 
     if 'commitment_loss' in loss_dict.keys():
         # This means we have a VQ-VAE and we still need to train the model to generate into the latent space
@@ -332,7 +323,7 @@ def ELBO_gaussian(mu, logvar):
     return -torch.mean(0.5 * torch.sum(1-mu**2 - logvar.exp() +logvar, dim = 1), dim = 0)
 
 @torch.no_grad
-def evaluation_step(model, test_dataloader,kl_weight,unnormalize, classification = False, logger = None):
+def evaluation_step(model, test_dataloader,unnormalize, classification = False, logger = None):
     device = torch.device('cuda' if next(model.parameters()).is_cuda else 'cpu')
     model.eval()
     loss = 0
@@ -354,6 +345,7 @@ def evaluation_step(model, test_dataloader,kl_weight,unnormalize, classification
         grid_in = torchvision.utils.make_grid(unnormalize(batch[0]), nrow = test_dataloader.batch_size // 2)
         grid_out = torchvision.utils.make_grid(unnormalize(out[0]).cpu(), nrow = test_dataloader.batch_size // 2)
         img_grid = torch.concat([grid_in, grid_out], dim = 1)
+        plt.imshow(img_grid.cpu().permute(1,2,0))
         logger.add_image('Test comparison', img_grid)
 
         logger.add_scalar('Loss eval', loss/len(test_dataloader.dataset))
@@ -427,10 +419,10 @@ def train_latent_generator(model, dataloader):
     for e in range(epochs):
         pbar = tqdm.tqdm(dataloader_encodings)
         for batch in pbar:
-            if len(batch) == BS:
-                x, label = batch.float(), batch.float()
-            else:
+            if type(batch) == list:
                 x, label = batch[0].long(), batch[1].long()
+            else:
+                x, label = batch.float(), batch.float()
             optim.zero_grad()
             out = model.latent_generator(x.to(device))
             loss_dict = model.latent_generator.loss_function(out, label.to(device))
@@ -441,3 +433,4 @@ def train_latent_generator(model, dataloader):
 
             pbar.set_description(f'Generator epoch: %.1f, loss: %.3f' % (e, loss.item()))
     return losses
+    

@@ -5,27 +5,8 @@ Downloaded from Kaggle, make sure that attributes file are in .txt and not .csv.
 # ResNet
 Strange behavior of model.eval(), mess up the batchnorm2d layers which leads to bad predictions.
 # VAE Models
-def loss_function(x, x_pred, mu, logvar, kl_weight):
-    loss = F.mse_loss(x_pred, x, reduction='sum') 
-    loss_kl = - 0.5 * torch.sum(1-mu**2 - logvar.exp() +logvar)
-    loss += loss_kl
-    return loss, loss_kl
-    
-    lr = 0.0005
-kl_weight = 0.1
-optimizer = torch.optim.AdamW(model2d.parameters(), lr = lr)
-epochs = 10
-model:
-  name: 'VAE_3D'
-  encoder_kernels: [7,3,3]
-  encoder_strides: [2,2,2]
-  encoder_channels: [16,32,64]
-  encoder_activation: 'leaky_relu'
-  encoder_mlp_dims: [128,2]
-  encoder_mlp_activation: 'leaky_relu'
-  decoder_activation: 'leaky_relu'
-  decoder_mlp_activation: 'leaky_relu'
-  conditionnal: False
+
+
 
 
 ## TO INVESTIGATE
@@ -54,10 +35,5 @@ Starting with too high kl weight leads to low variation and thus output of first
 First, 50 epochs with lr = 1e-4 and kl_weight = 0.00025, then 10 epochs with kl_weight = 0.0025
 
 
-
-
-
-
-# TODO
-
-Rewrite in VAE the encode separately from forward, to use later.
+# GAN
+Make sure when compute images sizes after convolutions or transposed convolutions to perform the modulo 2 before multiplying by 2.

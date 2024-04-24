@@ -7,14 +7,13 @@ dataset:
 model:
   name: 'GAN'
   latent_dim: 100
-  nb_convs: 2
   strides: [2,2]
-  kernels: [7,3]
+  kernels: [3,3]
   nb_channels: [64,128]
-  dropout: 0.2
+  dropout: 0.4
 optimization:
-  lr_discriminator: 0.002
-  lr_generator: 0.002
-  epochs: 10
+  lr_discriminator: 0.0002
+  lr_generator: 0.0002
+  epochs: 20
   beta_1: 0.5
-  beta_2: 0.9
+  beta_2: 0.999

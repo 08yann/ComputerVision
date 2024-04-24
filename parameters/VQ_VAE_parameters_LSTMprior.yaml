@@ -12,7 +12,7 @@ model:
   encoder_activation: 'leaky_relu'
   decoder_activation: 'leaky_relu'
   conditionnal: False
-  latent_dim: 2
+  latent_dim: 4
   size_codebook: 5
 optimization:
   lr: 0.005
@@ -23,10 +23,10 @@ optimization:
 latent_generator:
   model:
     name: LSTM
-    hidden_dim: 128
-    nb_layers: 2
+    hidden_dim: 32
+    nb_layers: 8
     context_size_dataset: 32
-    latent_dim_generator: 2
+    latent_dim_generator: 4
   optimization:
     criterion: 'cross_entropy'
     epochs: 10

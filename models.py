@@ -113,39 +113,37 @@ class ResNet(nn.Module):
 class Discriminator(nn.Module):
     def __init__(self, config, img_shape):
         super().__init__()
-        nb_convs = config['model']['nb_convs']
-        assert nb_convs = len(config['model']['kernels'])
-        assert nb_convs = len(config['model']['strides'])
-        assert nb_convs = len(config['model']['nb_channels'])
+        nb_convs = len(config['model']['nb_channels'])
+        assert nb_convs == len(config['model']['kernels'])
+        assert nb_convs == len(config['model']['strides'])
+
         nb_channels = copy.deepcopy(config['model']['nb_channels'])
         nb_channels.insert(0,img_shape[0])
-        convs = nn.ModuleList()
-        for i in range(nb_convs+1):
-            convs.append(nn.Sequential(
-                nn.Conv2d(nb_channels[i], nb_channels[i+1], config['model']['kernels'], stride = config['model']['stride'], padding = config['model']['kernels']//2),
+        self.convs = nn.ModuleList()
+        for i in range(nb_convs):
+            self.convs.append(nn.Sequential(
+                nn.Conv2d(nb_channels[i], nb_channels[i+1], config['model']['kernels'][i], stride = config['model']['strides'][i], padding = config['model']['kernels'][i]//2),
                 nn.BatchNorm2d(nb_channels[i+1]),
                 nn.LeakyReLU(negative_slope = 0.2)
             ))
                     
         self.out_size = img_shape[1]
-        for _ in range(nb_convs):
-            self.out_size = (self.out_size - config['model']['kernels'][i]+ 2 *config['model']['kernels'][i]//2)// config['model']['strides'][i] + 1
+        for i in range(nb_convs):
+            self.out_size = (self.out_size - config['model']['kernels'][i]+ 2 *(config['model']['kernels'][i]//2))// config['model']['strides'][i] + 1
         
         self.dropout = nn.Dropout(p = config['model']['dropout'])
         
-        flatten_dim = (img_shape[1] // (2**2))**2 * 2**3*nb_channels
+        flatten_dim = self.out_size**2 * nb_channels[-1]
 
         self.head = nn.Linear(flatten_dim, 1, bias = False)
     
     def forward(self, x):
         B = x.shape[0]
-        x = F.leaky_relu(self.conv1(x), negative_slope = 0.2)
-        x = F.leaky_relu(self.bn1(self.conv2(x)), negative_slope = 0.2)
-        x = F.leaky_relu(self.bn2(self.conv3(x)), negative_slope = 0.2)
-        x = F.leaky_relu(self.bn3(self.conv4(x)), negative_slope = 0.2)
-        x = F.leaky_relu(self.conv5(x), negative_slope = 0.2)
+        for conv in self.convs:
+            x = conv(x)
         x = self.dropout(x)
         x = x.reshape(B, -1)
+        
         logits = F.sigmoid(self.head(x))
         return logits
 
@@ -153,35 +151,44 @@ class Discriminator(nn.Module):
 class Generator(nn.Module):
     def __init__(self,config,img_shape,out_discriminator_size):
         super().__init__()
-        self.img_compressed = img_compressed
-        self.channels_start = 8*nb_channels
-        self.hidden_dim = self.img_compressed**2*self.channels_start
+        nb_convs = len(config['model']['nb_channels'])
+        self.out_discriminator_size = out_discriminator_size
+        nb_channels = copy.deepcopy(config['model']['nb_channels'])
+        nb_channels.insert(0, img_shape[0])
+        nb_channels.insert(-1, nb_channels[-1])
+        nb_channels = nb_channels[::-1]
+        self.latent_dim = config['model']['latent_dim']
+        flatten_dim = self.out_discriminator_size**2* nb_channels[0]
+        self.channel_start = nb_channels[0]
+        out_size = img_shape[1]
+        output_pad = []
+        for i in range(nb_convs):
+            if out_size% 2==0:
+                output_pad.append(1)
+            else:
+                output_pad.append(0)
+            out_size = (out_size - config['model']['kernels'][i]+ 2 *(config['model']['kernels'][i]//2))// config['model']['strides'][i] + 1
 
-        self.ln = nn.Linear(latent_dim, self.hidden_dim)
-        self.conv1T = nn.ConvTranspose2d(8*nb_channels, 4*nb_channels,kernel_size=3, stride = 2, padding = 1, output_padding=1)
-        self.bn1 = nn.BatchNorm2d(4*nb_channels)
-        self.conv2T = nn.ConvTranspose2d(4*nb_channels, 4*nb_channels,kernel_size=3, stride = 2, padding = 1, output_padding=1)
-        self.bn2 = nn.BatchNorm2d(4*nb_channels)
-        self.conv3T = nn.ConvTranspose2d(4*nb_channels, 2*nb_channels,kernel_size=3, stride = 2, padding = 1, output_padding=1)
-        self.bn3 = nn.BatchNorm2d(2*nb_channels)
-        self.conv4T = nn.ConvTranspose2d(2*nb_channels, nb_channels,kernel_size=3, stride = 2, padding = 1, output_padding=1)
-        self.bn4 = nn.BatchNorm2d(nb_channels)
-        self.conv5T = nn.ConvTranspose2d(nb_channels, img_channel, kernel_size= 7, stride = 2, padding = 3, output_padding=1)
-
+        self.output_pad = output_pad[::-1]
+        self.ln = nn.Linear(self.latent_dim, flatten_dim)
+        self.convTs = nn.ModuleList()
+        for i in range(nb_convs):
+            self.convTs.append(nn.Sequential(
+                nn.ConvTranspose2d(nb_channels[i], nb_channels[i+1], config['model']['kernels'][-(i+1)], stride = config['model']['strides'][-(i+1)], padding = config['model']['kernels'][-(i+1)]//2, output_padding = self.output_pad[i]),
+                nn.BatchNorm2d(nb_channels[i+1]),
+                nn.LeakyReLU()
+            ))
+        self.out_conv = nn.Sequential(nn.Conv2d(nb_channels[-2], nb_channels[-1], kernel_size = 3, stride = 1, padding = 1), nn.Tanh())
 
     def forward(self,x):
         B = x.shape[0]
-        x = F.relu(self.ln(x))
-        x = x.view(B, self.channels_start, self.img_compressed, self.img_compressed)
+        x = F.leaky_relu(self.ln(x))
+        x = x.view(B, self.channel_start, self.out_discriminator_size, self.out_discriminator_size)
 
-        x = F.relu(self.bn1(self.conv1T(x)))
-        x = F.relu(self.bn2(self.conv2T(x)))
-        x = F.relu(self.bn3(self.conv3T(x)))
-        x = F.relu(self.bn4(self.conv4T(x)))
-        x = F.tanh(self.conv5T(x))
-
+        for convT in self.convTs:
+            x = convT(x)
+        x = self.out_conv(x)
         return x
-
 
 class GAN(nn.Module):
     def __init__(self, config, img_shape, nb_classes):
@@ -191,7 +198,7 @@ class GAN(nn.Module):
         self.img_shape = img_shape
         self.discriminator = Discriminator(config, self.img_shape)
 
-        self.generator = Generator(config,  self.img_shape, nb_classes)
+        self.generator = Generator(config,  self.img_shape, self.discriminator.out_size)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -203,27 +210,55 @@ class GAN(nn.Module):
     
     def forward(self, x_real, label = None):
         B = x_real.shape[0]
-        device = self.discriminator.conv1.bias.device
+        device = self.generator.ln.bias.device
 
         noise = torch.randn((B, self.latent_dim)).to(device)
-        x_fake = self.generator(noise)
 
+        x_fake = self.generator(noise)
         x_cat = torch.cat([x_real, x_fake.detach()], dim = 0)
 
         out_discriminator = self.discriminator(x_cat)
-        out_generator = self.discriminator(x_fake)
-        return out_discriminator, out_generator
+        return out_discriminator,  noise
 
-    def loss_function(self, x_out):
-        out_discriminator, out_generator = x_out[0], x_out[1]
-        B = out_discriminator.shape[0]//2
-        y_discriminator = torch.cat([torch.ones(B), torch.zeros(B)], dim = 0)
-        y_generator = torch.ones(B)
+    def loss_function(self, x_out, y, gen_net = False):        
+        loss = F.binary_cross_entropy(x_out, y)
+        return loss
 
-        loss_discriminator = F.binary_cross_entropy(out_discriminator, y_discriminator)
-        loss_generator = F.binary_cross_entropy(out_generator, y_generator)
-        loss_dict = {'loss_discriminator': loss_discriminator, 'loss_generator': loss_generator}
-        return loss_dict
+    def gan_step(self,optimizer, x):
+        device = x.device
+        noise = torch.randn((x.shape[0], self.latent_dim)).to(device)
+
+        x_fake = self.generator(noise)
+
+        optimizer[0].zero_grad()
+        out_real = self.discriminator(x)
+        loss_D = self.loss_function(out_real, torch.ones(x.shape[0],1).to(device))
+        loss_D.backward()
+        optimizer[0].step()
+
+        loss_discriminator = loss_D.item()
+
+        out_fake = self.discriminator(x_fake.detach())
+        loss_D = self.loss_function(out_fake, torch.zeros(out_fake.shape[0], 1).to(device))
+        loss_D.backward()
+        optimizer[0].step()
+
+        loss_discriminator += loss_D.item()
+
+        optimizer[1].zero_grad()
+        out_gen = self.discriminator(x_fake)
+        loss_G = self.loss_function(out_gen, torch.ones(out_gen.shape[0],1).to(device))
+        loss_G.backward()
+        optimizer[1].step()
+
+        loss_generator = loss_G.item()
+        return loss_discriminator, loss_generator
+
+    @torch.no_grad()
+    def sample(self, nb_images):
+        device = torch.device('cuda')
+        z = torch.randn((nb_images, self.latent_dim)).to(device)
+        return self.generator(z)
 
 #########################################################
 class BaseVAE(nn.Module):
@@ -245,8 +280,8 @@ class BaseVAE(nn.Module):
 
     @torch.no_grad()
     def sample(self,nb_images, z = None):
-        device = torch
-        z = torch.randn()
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        z = torch.randn(10)
         raise NotImplementedError
 
     
@@ -600,7 +635,8 @@ class MultiStage_VAE(nn.Module):
 # Simple model, interesting for MNIST dataset especially the manifold function for 2-dimensional latent space. 
 class VAE_3D(nn.Module):
     def __init__(self, config, img_shape, nb_classes = None):
-        super(VAE_3D, self).__init__()
+        super().__init__()
+
         self.optim_params = config['optimization']
         self.img_channels = img_shape[0]
         self.img_size = img_shape[1]
