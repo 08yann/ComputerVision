@@ -12,21 +12,23 @@ model:
   encoder_activation: 'leaky_relu'
   decoder_activation: 'leaky_relu'
   conditionnal: False
-  latent_dim: 4
+  latent_dim: 2
   size_codebook: 5
 optimization:
   lr: 0.005
   commitment_weight: 0.2
   criterion: 'mse'
-  epochs: 20
+  epochs: 15
   weight_decay: 0
 latent_generator:
   model:
-    name: PixelCNN
-    nb_layers: 12
-    channel_dim: 32
+    name: LSTM
+    hidden_dim: 128
+    nb_layers: 2
+    context_size_dataset: 32
+    latent_dim_generator: 2
   optimization:
     criterion: 'cross_entropy'
     epochs: 10
-    lr: 0.005
+    lr: 0.0005
     

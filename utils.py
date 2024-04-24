@@ -1,5 +1,6 @@
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.sampler import WeightedRandomSampler
+import torch.nn.functional as F
 from torchvision import transforms
 import torchvision
 import os
@@ -11,6 +12,7 @@ import torch
 import pickle
 import tqdm
 import matplotlib.pyplot as plt
+import random
 
 def listdir(dname):
     fnames = list(chain(*[list(Path(dname).rglob('*.' + ext)) for ext in ['png','jpg','jpeg','JPG']]))
@@ -170,6 +172,54 @@ class MnistQuantizedEncoding(Dataset):
         context = self.quantized[index]
         return context
 
+class MnistSeqDataset(Dataset):
+    def __init__(self, model, dataloader):
+        # Similar to NLP, write image as a sequence, add start token to each sequence and pad sequences to get same length as context size 
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.size_codebook = model.size_codebook
+        self.start_token = self.size_codebook
+        self.pad_token = self.size_codebook+1
+        self.context_size = model.latent_generator.context_size_dataset
+        self.sents = self.load_sents(model, dataloader)
+    
+
+    def load_sents(self,model, dataloader):
+        device = torch.device('cuda' if next(model.parameters()).is_cuda else 'cpu')
+
+        seqs = None
+        with torch.no_grad():
+            pbar = tqdm.tqdm(dataloader)
+            pbar.set_description(f'Encodings preparation')
+            for x, _ in pbar:
+                _,_,_, quantized_idx = model(x.to(device))
+                seqs = quantized_idx.cpu() if seqs is None else torch.cat([seqs, quantized_idx.cpu()], dim = 0)
+
+        seqs = seqs.reshape(seqs.shape[0], -1)
+        
+        nb_seqs = seqs.shape[0]
+        seqs = torch.cat([torch.ones(nb_seqs,1)*self.start_token,seqs], dim = 1)
+        len_seqs = seqs.shape[1]
+
+        sents = []
+        for i in range(nb_seqs):
+            if random.random() > 0.1:
+                continue
+            encoding = seqs[i]
+            for idx in range(len_seqs):
+                pad_encoding = encoding[idx:idx + self.context_size+1] 
+                if idx + self.context_size >= len_seqs:
+                    pad_encoding = F.pad(pad_encoding, pad = (0, self.context_size + 1 - len(pad_encoding))  , value = self.pad_token)
+                sents.append((pad_encoding[:-1], pad_encoding[1:]))
+
+        return sents
+       
+    def __len__(self):
+        return len(self.sents)
+    
+    def __getitem__(self, index):
+        context, target = self.sents[index]
+        return context, target
+
 
 class Annealizer:
     def __init__(self,total_steps, cyclical = False):
@@ -242,14 +292,30 @@ def training_steps(model, dataloader, unnormalize = None, classification = False
         pbar = tqdm.tqdm(dataloader)
         
         for x, label in pbar:
-            optimizer.zero_grad()
+            
             out = model(x.to(device), label.to(device))
             loss_dict = model.loss_function(out, label.to(device)) if classification else model.loss_function(out, x.to(device),unnormalize)
 
-            loss = loss_dict['loss']
-            loss.backward()
-            optimizer.step()
-            losses.append(loss.item())
+            if 'loss_discriminator' in loss_dict:
+                loss = loss['loss_discriminator']
+                loss.backward()
+                loss.s
+                optimizer[0].step()
+                optimizer[0].zero_grad()
+
+                loss = loss['loss_generator']
+                loss.backward()
+                optimizer[1].step()
+                optimizer[1].zero_grad()
+
+
+            
+            else:
+                loss = loss_dict['loss']
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+                losses.append(loss.item())
 
             if logger is not None:
                 logger.add_scalar('loss',loss.item(), loss_idx)
@@ -279,6 +345,7 @@ def evaluation_step(model, test_dataloader,kl_weight,unnormalize, classification
         loss += loss_dict['loss'].item()
         if classification:
             acc += loss_dict['accuracy']
+
 
     if logger is not None:
         batch = next(iter(test_dataloader))
@@ -324,36 +391,49 @@ def configure_optimizer(model):
     except:
         weight_decay = 0
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr =model.optim_params['lr'], weight_decay=model.optim_params['weight_decay'], betas=(beta_1,beta_2))
+    if 'lr_discriminator' in model.optim_params:
+        optimizers = [torch.optim.AdamW(model.discriminator.parameters(), lr = model.optim_params['lr_discriminator'], weight_decay = weight_decay, betas = (beta_1, beta_2))]
+        optimizers.append(torch.optim.AdamW(model.generator.parameters(), lr = model.optim_params['lr_generator'], weight_decay = weight_decay, betas = (beta_1, beta_2)))
+        return optimizers
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr =model.optim_params['lr'], weight_decay = weight_decay, betas=(beta_1,beta_2))
 
     return optimizer
 
 def train_latent_generator(model, dataloader):
     device = torch.device('cuda' if next(model.parameters()).is_cuda else 'cpu')
-    to_save = None
-    model.eval()
-    with torch.no_grad():
-        for im, _ in dataloader:
-            im = im.to(device)
-            _, _, _, quantized_idx = model(im)
-            to_save = quantized_idx if to_save is None else torch.cat([to_save, quantized_idx], dim = 0)
+    BS = 64
+    if model.generator_name == 'LSTM':
+        encodings_mnist = MnistSeqDataset(model, dataloader)
+    else:
+        
+        to_save = None
+        model.eval()
+        with torch.no_grad():
+            for im, _ in dataloader:
+                im = im.to(device)
+                _, _, _, quantized_idx = model(im)
+                to_save = quantized_idx if to_save is None else torch.cat([to_save, quantized_idx], dim = 0)
 
-        pickle.dump(to_save,open('./additional_datasets/mnist_quantized_encodings.pkl','wb'))
-    
-    encodings_mnist = MnistQuantizedEncoding(model.size_codebook, model.out_encoder_size)
-    dataloader_encodings = DataLoader(encodings_mnist, batch_size = 64, shuffle = True)
-
+            pickle.dump(to_save,open('./additional_datasets/mnist_quantized_encodings.pkl','wb'))
+        
+        encodings_mnist = MnistQuantizedEncoding(model.size_codebook , model.out_encoder_size)
+    dataloader_encodings = DataLoader(encodings_mnist, batch_size = BS, shuffle = True)
 
     losses = []
     model.latent_generator.train()
-    epochs = model.latent_generator.config['optimization']['epochs']
-    optim = torch.optim.AdamW(model.latent_generator.parameters(),model.latent_generator.config['optimization']['lr'])
+    epochs = model.latent_generator.optim_params['epochs']
+    optim = torch.optim.AdamW(model.latent_generator.parameters(),model.latent_generator.optim_params['lr'])
     for e in range(epochs):
         pbar = tqdm.tqdm(dataloader_encodings)
-        for x in pbar:
+        for batch in pbar:
+            if len(batch) == BS:
+                x, label = batch.float(), batch.float()
+            else:
+                x, label = batch[0].long(), batch[1].long()
             optim.zero_grad()
-            out = model.latent_generator(x.float().to(device))
-            loss_dict = model.latent_generator.loss_function(out, x.to(device))
+            out = model.latent_generator(x.to(device))
+            loss_dict = model.latent_generator.loss_function(out, label.to(device))
             loss = loss_dict['loss']
             loss.backward()
             optim.step()

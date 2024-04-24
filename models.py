@@ -111,21 +111,29 @@ class ResNet(nn.Module):
 #  GAN
 ######################################
 class Discriminator(nn.Module):
-    def __init__(self, img_channel,img_size = 224, nb_channels = 64, drop = 0.2):
+    def __init__(self, config, img_shape):
         super().__init__()
-
-        self.conv1 = nn.Conv2d(img_channel, nb_channels, kernel_size=7, stride = 2, padding = 3)
-        self.conv2 = nn.Conv2d(nb_channels, nb_channels*2,kernel_size=3, stride = 2,padding = 1)
-        self.bn1 = nn.BatchNorm2d(2*nb_channels)
-        self.conv3 = nn.Conv2d(nb_channels*2, nb_channels*4, kernel_size=3, stride = 2, padding=1)
-        self.bn2 = nn.BatchNorm2d(4*nb_channels)
-        self.conv4 = nn.Conv2d(4*nb_channels, 4*nb_channels, kernel_size=3, stride = 2, padding = 1)
-        self.bn3 = nn.BatchNorm2d(nb_channels*4)
-        self.conv5 = nn.Conv2d(4*nb_channels, 8*nb_channels, kernel_size= 3, stride = 2, padding=1)
-
-        self.dropout = nn.Dropout(p = drop)
+        nb_convs = config['model']['nb_convs']
+        assert nb_convs = len(config['model']['kernels'])
+        assert nb_convs = len(config['model']['strides'])
+        assert nb_convs = len(config['model']['nb_channels'])
+        nb_channels = copy.deepcopy(config['model']['nb_channels'])
+        nb_channels.insert(0,img_shape[0])
+        convs = nn.ModuleList()
+        for i in range(nb_convs+1):
+            convs.append(nn.Sequential(
+                nn.Conv2d(nb_channels[i], nb_channels[i+1], config['model']['kernels'], stride = config['model']['stride'], padding = config['model']['kernels']//2),
+                nn.BatchNorm2d(nb_channels[i+1]),
+                nn.LeakyReLU(negative_slope = 0.2)
+            ))
+                    
+        self.out_size = img_shape[1]
+        for _ in range(nb_convs):
+            self.out_size = (self.out_size - config['model']['kernels'][i]+ 2 *config['model']['kernels'][i]//2)// config['model']['strides'][i] + 1
         
-        flatten_dim = (img_size // (2**5))**2 * 2**3*nb_channels
+        self.dropout = nn.Dropout(p = config['model']['dropout'])
+        
+        flatten_dim = (img_shape[1] // (2**2))**2 * 2**3*nb_channels
 
         self.head = nn.Linear(flatten_dim, 1, bias = False)
     
@@ -143,7 +151,7 @@ class Discriminator(nn.Module):
 
 
 class Generator(nn.Module):
-    def __init__(self,latent_dim,img_channel = 3,  nb_channels = 64, img_compressed = 7):
+    def __init__(self,config,img_shape,out_discriminator_size):
         super().__init__()
         self.img_compressed = img_compressed
         self.channels_start = 8*nb_channels
@@ -174,6 +182,48 @@ class Generator(nn.Module):
 
         return x
 
+
+class GAN(nn.Module):
+    def __init__(self, config, img_shape, nb_classes):
+        super().__init__()
+        self.optim_params = config['optimization']
+        self.latent_dim = config['model']['latent_dim']
+        self.img_shape = img_shape
+        self.discriminator = Discriminator(config, self.img_shape)
+
+        self.generator = Generator(config,  self.img_shape, nb_classes)
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.normal_(m.weight, 0.0, 0.02)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
+    
+    def forward(self, x_real, label = None):
+        B = x_real.shape[0]
+        device = self.discriminator.conv1.bias.device
+
+        noise = torch.randn((B, self.latent_dim)).to(device)
+        x_fake = self.generator(noise)
+
+        x_cat = torch.cat([x_real, x_fake.detach()], dim = 0)
+
+        out_discriminator = self.discriminator(x_cat)
+        out_generator = self.discriminator(x_fake)
+        return out_discriminator, out_generator
+
+    def loss_function(self, x_out):
+        out_discriminator, out_generator = x_out[0], x_out[1]
+        B = out_discriminator.shape[0]//2
+        y_discriminator = torch.cat([torch.ones(B), torch.zeros(B)], dim = 0)
+        y_generator = torch.ones(B)
+
+        loss_discriminator = F.binary_cross_entropy(out_discriminator, y_discriminator)
+        loss_generator = F.binary_cross_entropy(out_generator, y_generator)
+        loss_dict = {'loss_discriminator': loss_discriminator, 'loss_generator': loss_generator}
+        return loss_dict
 
 #########################################################
 class BaseVAE(nn.Module):
@@ -253,112 +303,6 @@ class VAE_1D(nn.Module):
         x_hat = self.decoder(z)
 
         return x_hat, mu, logvar
-
-
-# VAE_complex (code below) cannot decode correctly, hence other architecture implementation
-'''class VAEBlock_other(nn.Module):
-    def __init__(self,in_channel):
-        super().__init__()
-        self.block = nn.Sequential(
-            nn.Conv2d(in_channel, in_channel, 1),
-            nn.LeakyReLU(),
-            nn.Conv2d(in_channel, in_channel, 3, padding=1),
-            nn.BatchNorm2d(in_channel),
-            nn.LeakyReLU(),
-        )
-    
-    def forward(self,x, label = None):
-        out = x + self.block(x)
-        return out
-
-class VAE_other(nn.Module):
-    def __init__(self, channels, latent_dim):
-        super().__init__()
-        self.blocks_conv = nn.ModuleList()
-        self.chan = copy.deepcopy(channels)
-        self.chan.insert(0,3)
-        for i in range(1,len(self.chan)):
-            self.blocks_conv.append(nn.Sequential(
-                nn.Conv2d(self.chan[i-1], self.chan[i], 3, stride = 2, padding = 1),
-                nn.BatchNorm2d(self.chan[i]),
-                nn.LeakyReLU()
-            ))
-        
-        self.enc_block = nn.Sequential(*[VAEBlock_other(self.chan[-1]) for _ in range(4)])
-
-        self.mlp_mu = nn.Sequential(
-            nn.Linear(self.chan[-1]*16, self.chan[-1]),
-            nn.LeakyReLU(),
-            nn.Linear(self.chan[-1], latent_dim)    
-        )
-
-        self.mlp_logvar = nn.Sequential(
-            nn.Linear(self.chan[-1]*16, self.chan[-1]),
-            nn.LeakyReLU(),
-            nn.Linear(self.chan[-1], latent_dim)    
-        )
-
-
-        self.dec_mlp = nn.Sequential(
-            nn.Linear(latent_dim, self.chan[-1]),
-            nn.LeakyReLU(),
-            nn.Linear(self.chan[-1], self.chan[-1]*16)
-        )
-
-        self.dec_block = nn.Sequential(*[VAEBlock_other(self.chan[-1]) for _ in range(4)])
-
-        self.dec_convTs = nn.ModuleList()
-        for i in range(len(channels),1,-1):
-            self.dec_block.append(nn.Sequential(
-                nn.ConvTranspose2d(self.chan[i], self.chan[i-1], 3, stride = 2, padding=1, output_padding=1),
-                nn.BatchNorm2d(self.chan[i-1]),
-                nn.LeakyReLU()
-            ))
-
-        self.final = nn.Sequential(
-            nn.ConvTranspose2d(self.chan[1], self.chan[1], 3, stride = 2, padding = 1, output_padding=1),
-            nn.LeakyReLU(),
-            nn.Conv2d(self.chan[1], self.chan[0], 3, padding=1),
-            nn.Tanh()
-        )
-
-    def reparameterize(self, mu, logvar):
-        std = torch.exp(0.5*logvar)
-        eps = torch.randn_like(std)
-        return eps * std + mu
-
-    def decoder(self,x):
-        x = self.dec_mlp(x)
-        x = x.view(-1,512,4,4)
-        x = self.dec_block(x)
-        for block in self.dec_convTs:
-            x = block(x)
-        out = self.final(x)
-
-        return out
-
-    def forward(self, x, label = None):
-        for block in self.blocks_conv:
-            x = block(x)
-
-        x = self.enc_block(x)
-        out = torch.flatten(x, start_dim = 1)
-        mu = self.mlp_mu(out)
-        logvar = self.mlp_logvar(out)
-
-        z = self.reparameterize(mu, logvar)
-
-        x_hat = self.decoder(z)
-        return x_hat, mu, logvar
-
-    @torch.no_grad()
-    def sample(self, nb_images, z = None):            
-        if z is None:
-            device = self.mlp_mu[0].weight.device
-            z = torch.randn((nb_images, 512)).to(device)
-
-        x_pred = self.decoder(z)
-        return x_pred'''
 
 class VAE_Block(nn.Module):
     def __init__(self,in_channel, out_channel, kernel, stride, last_activ = nn.LeakyReLU()):
@@ -881,6 +825,7 @@ class  VQ_VAE(nn.Module):
         self.optim_params = config['optimization']
         self.latent_dim = config['model']['latent_dim']
         self.size_codebook = config['model']['size_codebook']
+        self.generator_name = config['latent_generator']['model']['name']
 
         self.img_shape = img_shape
         self.nb_classes = nb_classes
@@ -981,20 +926,58 @@ class  VQ_VAE(nn.Module):
         return x_pred
 
 class LSTM_VQVAE(nn.Module):
-    def __init__(self, config, hidden_dim = 256, nb_layers = 3):
+    def __init__(self, config,img_shape, nb_classes):
         super().__init__()
-        self.latent_dim = config['latent_dim']
-        self.size_codebook = config['size_codebook']
+        self.optim_params = config['optimization']
+        self.latent_dim = config['model']['latent_dim_generator']
+        self.context_size_dataset = config['model']['context_size_dataset']
+        self.size_codebook = nb_classes
+        self.img_shape = img_shape
+        hidden_dim = config['model']['hidden_dim']
+        nb_layers = config['model']['nb_layers']
         self.lstm = nn.LSTM(input_size=self.latent_dim, hidden_size=hidden_dim, num_layers=nb_layers, batch_first = True)
-        self.mlp = nn.Sequential(nn.Linear(hidden_dim, hidden_dim//4), nn.ReLU(), nn.Linear(hidden_dim//4, self.size_codebook))
+        self.mlp = nn.Sequential(nn.Linear(hidden_dim, hidden_dim//4), nn.ReLU(), nn.Linear(hidden_dim//4, self.size_codebook + 2))
         self.word_embedding = nn.Embedding(self.size_codebook + 2, self.latent_dim)
 
     def forward(self,x , label = None):
         x = self.word_embedding(x)
         out, _= self.lstm(x)
-        out = out[:,-1,:]
+        #out = out[:,-1,:]
         return self.mlp(out)
-        
+
+    def loss_function(self, x_out, x_true):
+        loss = torch.mean(F.cross_entropy(x_out.permute(0,2,1), x_true.long()))
+        return {'loss':loss}
+    
+    @torch.no_grad()
+    def generate(self, nb_samples):
+        quantized_idx = []
+        encodings_len = self.img_shape[1]*self.img_shape[2]
+
+        device = self.mlp[0].bias.device
+
+        for _ in range(nb_samples):
+            seq = torch.ones(1).to(device)*self.size_codebook
+            for i in range(encodings_len):
+                padded_seq = seq 
+                if len(padded_seq) < self.context_size_dataset:
+                    padded_seq = nn.functional.pad(padded_seq, pad = (0,self.context_size_dataset-len(padded_seq)),value = self.size_codebook)
+                out = self(padded_seq[-self.context_size_dataset:].unsqueeze(0).long().to(device))
+                if i >= self.context_size_dataset:
+                    probs = F.softmax(out[0][-1], dim = -1)
+                else:
+                    probs = F.softmax(out[0][i], dim = -1)
+                idx = torch.multinomial(probs, num_samples = 1)
+                if idx >= self.size_codebook:
+                    idx = torch.multinomial(probs[:-2], num_samples = 1)
+                seq = torch.cat([seq, idx])
+            quantized_idx.append(seq[1:].unsqueeze(0))
+        quantized_batch = torch.cat(quantized_idx, dim = 0)
+        quantized_batch = quantized_batch.reshape(quantized_batch.shape[0], self.img_shape[1],self.img_shape[2]).long().unsqueeze(1)
+        return quantized_batch
+
+
+
 
 class MaskedConv2d(nn.Conv2d):
     def __init__(self, mask_type, *args, **kwargs):
@@ -1084,7 +1067,7 @@ class PixelCNN(nn.Module):
 class PixelCNN_VQVAE(nn.Module):
     def __init__(self, config, img_shape,nb_classes):
         super().__init__()
-        self.config = config
+        self.optim_params = config['optimization']
         self.size_codebook = nb_classes
         self.img_shape = img_shape
         nb_layers = config['model']['nb_layers']
@@ -1114,7 +1097,7 @@ class PixelCNN_VQVAE(nn.Module):
 
     def loss_function(self, x_out, x_true, unnormalize = None):
         try:
-            criterion = self.config['optimization']['criterion']
+            criterion = self.optim_params['criterion']
         except:
             criterion = 'mse'
         if criterion == 'cross_entropy':
