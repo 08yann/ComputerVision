@@ -294,7 +294,7 @@ def training_steps(model, dataloader, unnormalize = None, classification = False
         for x, label in pbar:
             if type(optimizer) == list:
                 x = x.to(device)
-                loss_discriminator, loss_generator = model.gan_step(optimizer, x)
+                loss_discriminator, loss_generator = model.gan_step(optimizer, x, label.to(device))
                 pbar.set_description(f'GAN epoch: %.3f Loss D: %.3f Loss G: %.3f' % (e,loss_discriminator, loss_generator))
 
             else:
@@ -336,7 +336,6 @@ def evaluation_step(model, test_dataloader,unnormalize, classification = False, 
         loss += loss_dict['loss'].item()
         if classification:
             acc += loss_dict['accuracy']
-
 
     if logger is not None:
         batch = next(iter(test_dataloader))
@@ -434,3 +433,7 @@ def train_latent_generator(model, dataloader):
             pbar.set_description(f'Generator epoch: %.1f, loss: %.3f' % (e, loss.item()))
     return losses
     
+
+def show_grid(img):
+    plt.imshow(torchvision.utils.make_grid(img.cpu()).permute(1,2,0))
+    plt.show()

@@ -111,14 +111,20 @@ class ResNet(nn.Module):
 #  GAN
 ######################################
 class Discriminator(nn.Module):
-    def __init__(self, config, img_shape):
+    def __init__(self, config, img_shape, nb_classes, conditionnal = False):
         super().__init__()
         nb_convs = len(config['model']['nb_channels'])
         assert nb_convs == len(config['model']['kernels'])
         assert nb_convs == len(config['model']['strides'])
 
+        self.nb_classes = nb_classes
+        self.conditionnal = conditionnal
+        self.img_shape = img_shape
         nb_channels = copy.deepcopy(config['model']['nb_channels'])
         nb_channels.insert(0,img_shape[0])
+        if self.conditionnal:
+            nb_channels[0] += self.nb_classes
+
         self.convs = nn.ModuleList()
         for i in range(nb_convs):
             self.convs.append(nn.Sequential(
@@ -137,8 +143,14 @@ class Discriminator(nn.Module):
 
         self.head = nn.Linear(flatten_dim, 1, bias = False)
     
-    def forward(self, x):
+    def forward(self, x, label = None):
         B = x.shape[0]
+        if self.conditionnal:
+            label_one_hot = torch.zeros(B, self.nb_classes, self.img_shape[1], self.img_shape[2]).to(x.device)
+            idx = torch.arange(B)
+            label_one_hot[idx, label[idx].long()] = 1
+            x = torch.cat([x,label_one_hot], dim = 1)
+
         for conv in self.convs:
             x = conv(x)
         x = self.dropout(x)
@@ -149,15 +161,23 @@ class Discriminator(nn.Module):
 
 
 class Generator(nn.Module):
-    def __init__(self,config,img_shape,out_discriminator_size):
+    def __init__(self,config,img_shape,out_discriminator_size,nb_classes, conditionnal = False):
         super().__init__()
         nb_convs = len(config['model']['nb_channels'])
+
+        self.conditionnal = conditionnal
+        self.nb_classes = nb_classes
+        self.img_shape = img_shape
         self.out_discriminator_size = out_discriminator_size
         nb_channels = copy.deepcopy(config['model']['nb_channels'])
         nb_channels.insert(0, img_shape[0])
         nb_channels.insert(-1, nb_channels[-1])
         nb_channels = nb_channels[::-1]
+
+
         self.latent_dim = config['model']['latent_dim']
+        if self.conditionnal:
+            self.latent_dim += self.nb_classes
         flatten_dim = self.out_discriminator_size**2* nb_channels[0]
         self.channel_start = nb_channels[0]
         out_size = img_shape[1]
@@ -180,8 +200,16 @@ class Generator(nn.Module):
             ))
         self.out_conv = nn.Sequential(nn.Conv2d(nb_channels[-2], nb_channels[-1], kernel_size = 3, stride = 1, padding = 1), nn.Tanh())
 
-    def forward(self,x):
+        if self.conditionnal:
+            self.latent_dim -= self.nb_classes
+
+    def forward(self,x, label = None):
         B = x.shape[0]
+        if self.conditionnal:
+            label_one_hot = torch.zeros(B, self.nb_classes).to(label.device)
+            label_one_hot.scatter_(1, label.unsqueeze(1).long(), 1)
+            x = torch.cat([x, label_one_hot], dim = -1)
+
         x = F.leaky_relu(self.ln(x))
         x = x.view(B, self.channel_start, self.out_discriminator_size, self.out_discriminator_size)
 
@@ -196,9 +224,16 @@ class GAN(nn.Module):
         self.optim_params = config['optimization']
         self.latent_dim = config['model']['latent_dim']
         self.img_shape = img_shape
-        self.discriminator = Discriminator(config, self.img_shape)
+        self.nb_classes = nb_classes
+        try:
+            self.conditionnal = config['model']['conditionnal']
+        except:
+            self.conditionnal = False
 
-        self.generator = Generator(config,  self.img_shape, self.discriminator.out_size)
+
+        self.discriminator = Discriminator(config, self.img_shape,self.nb_classes, self.conditionnal)
+
+        self.generator = Generator(config,  self.img_shape, self.discriminator.out_size,self.nb_classes, self.conditionnal)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -214,31 +249,31 @@ class GAN(nn.Module):
 
         noise = torch.randn((B, self.latent_dim)).to(device)
 
-        x_fake = self.generator(noise)
+        x_fake = self.generator(noise, label)
         x_cat = torch.cat([x_real, x_fake.detach()], dim = 0)
 
-        out_discriminator = self.discriminator(x_cat)
-        return out_discriminator,  noise
+        out_discriminator = self.discriminator(x_cat,torch.cat([label, label], dim = 0))
+        return out_discriminator,  x_fake
 
-    def loss_function(self, x_out, y, gen_net = False):        
+    def loss_function(self, x_out, y):        
         loss = F.binary_cross_entropy(x_out, y)
         return loss
 
-    def gan_step(self,optimizer, x):
+    def gan_step(self,optimizer, x, label = None):
         device = x.device
         noise = torch.randn((x.shape[0], self.latent_dim)).to(device)
 
-        x_fake = self.generator(noise)
+        x_fake = self.generator(noise, label)
 
         optimizer[0].zero_grad()
-        out_real = self.discriminator(x)
+        out_real = self.discriminator(x,label)
         loss_D = self.loss_function(out_real, torch.ones(x.shape[0],1).to(device))
         loss_D.backward()
         optimizer[0].step()
 
         loss_discriminator = loss_D.item()
 
-        out_fake = self.discriminator(x_fake.detach())
+        out_fake = self.discriminator(x_fake.detach(), label)
         loss_D = self.loss_function(out_fake, torch.zeros(out_fake.shape[0], 1).to(device))
         loss_D.backward()
         optimizer[0].step()
@@ -246,19 +281,40 @@ class GAN(nn.Module):
         loss_discriminator += loss_D.item()
 
         optimizer[1].zero_grad()
-        out_gen = self.discriminator(x_fake)
+        out_gen = self.discriminator(x_fake, label)
         loss_G = self.loss_function(out_gen, torch.ones(out_gen.shape[0],1).to(device))
         loss_G.backward()
         optimizer[1].step()
 
         loss_generator = loss_G.item()
+        '''optimizer[0].zero_grad()
+
+        B = x[1].shape[0]
+        y_D = torch.cat([torch.ones(B,1), torch.zeros(B,1)], dim = 0).to(x[0].device)
+        loss_D = self.loss_function(x[0], y_D)
+        loss_D.backward()
+        optimizer[0].step()
+
+        loss_discriminator = loss_D.item()
+
+        optimizer[1].zero_grad()
+        out_gen = self.discriminator(x[1])
+        loss_G = self.loss_function(out_gen, torch.ones(B,1).to(x[1].device))
+        loss_G.backward()
+        optimizer[1].step()
+
+        loss_generator = loss_G.item()
+'''
         return loss_discriminator, loss_generator
 
     @torch.no_grad()
-    def sample(self, nb_images):
+    def sample(self, nb_images, label = None):
         device = torch.device('cuda')
+        if self.conditionnal:
+            if label is None:
+                label = torch.random.randint(self.nb_classes, nb_images).to(device)
         z = torch.randn((nb_images, self.latent_dim)).to(device)
-        return self.generator(z)
+        return self.generator(z, label)
 
 #########################################################
 class BaseVAE(nn.Module):
@@ -637,6 +693,7 @@ class VAE_3D(nn.Module):
     def __init__(self, config, img_shape, nb_classes = None):
         super().__init__()
 
+        assert config['model']['name'] == 'VAE_3D'
         self.optim_params = config['optimization']
         self.img_channels = img_shape[0]
         self.img_size = img_shape[1]
@@ -680,7 +737,6 @@ class VAE_3D(nn.Module):
 
 
         if self.conditionnal:
-            self.nb_channels[0] += self.nb_classes
             dec_mlp_dims[0] += self.nb_classes
         
         for i in range(len(self.dec_kernels)):
@@ -696,8 +752,7 @@ class VAE_3D(nn.Module):
         self.mlp_mu = nn.ModuleList([nn.Sequential(nn.Linear(enc_mlp_dims[i], enc_mlp_dims[i+1]), activation_dict[self.config['encoder_mlp_activation']] if i<len(enc_mlp_dims)-2 else nn.Identity()) for i in range(len(enc_mlp_dims)-1)])
         self.mlp_logvar = nn.ModuleList([nn.Sequential(nn.Linear(enc_mlp_dims[i], enc_mlp_dims[i+1]), activation_dict[self.config['encoder_mlp_activation']] if i<len(enc_mlp_dims)-2 else nn.Identity()) for i in range(len(enc_mlp_dims)-1)])
         
-        if self.conditionnal:
-            self.nb_channels[0] -= self.nb_classes
+
         self.dec_convs = nn.ModuleList([nn.Sequential(
                                             nn.ConvTranspose2d(self.nb_channels[-i-1], self.nb_channels[-i-2], kernel_size=self.dec_kernels[i],stride=self.config['encoder_strides'][-i-1], padding=self.pad[-i-1], output_padding=self.output_pad[i]),
                                             nn.BatchNorm2d(self.nb_channels[-i-2]),
@@ -713,10 +768,8 @@ class VAE_3D(nn.Module):
 
     def decoder(self, z, label = None):
         if self.conditionnal:
-            device = self.enc_convs[0][0].bias.device
-            label_one_hot = torch.zeros(z.shape[0], self.nb_classes).to(device)
-            batch_idx = torch.arange(0, z.shape[0])
-            label_one_hot[batch_idx, label] = 1
+            label_one_hot = torch.zeros(z.shape[0], self.nb_classes).to(label.device)
+            label_one_hot.scatter_(1, label.unsqueeze(1).long(), 1)
             z = torch.cat([z, label_one_hot], dim = -1)
 
         for fc in self.dec_mlp:
@@ -730,15 +783,6 @@ class VAE_3D(nn.Module):
         return x_hat
     def encoder(self, x, label = None):
         b = x.shape[0]
-
-        if self.conditionnal:
-            device = self.enc_convs[0][0].bias.device
-            label_expanded = torch.zeros(b, self.nb_classes, *x.shape[2:]).to(device)
-            batch_idx = torch.arange(0, b, device = device)
-            label_expanded[batch_idx, label,:,:] = 1
-
-            x = torch.cat([x,label_expanded], dim = 1)
-
 
         for conv in self.enc_convs:
             x = conv(x)
@@ -761,7 +805,7 @@ class VAE_3D(nn.Module):
                 
         z = self.reparameterize(mu, logvar)
 
-        x_hat = self.decoder(z)
+        x_hat = self.decoder(z, label)
 
         return x_hat, mu, logvar
 
@@ -784,6 +828,9 @@ class VAE_3D(nn.Module):
         if z is None:
             device = self.enc_convs[0][0].bias.device
             z = torch.randn((nb_images, self.latent_dim)).to(device)
+        if self.conditionnal:
+            if label is None:
+                label = torch.random.randint(0, self.nb_classes,(nb_images))
 
         x_pred = self.decoder(z, label)
         return x_pred

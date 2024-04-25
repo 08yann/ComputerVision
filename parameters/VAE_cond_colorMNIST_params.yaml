@@ -1,0 +1,27 @@
+dataset:
+  name: 'colorMNIST'
+  batch_size: 64
+  img_size: 28
+  mean: 0.5
+  std: 0.5
+model:
+  name: 'VAE_3D'
+  encoder_kernels: [3,3,3]
+  encoder_strides: [2,2,2]
+  #encoder_pad: [1,1,1]
+  encoder_channels: [16,32,64]
+  encoder_activation: 'leaky_relu'
+  encoder_mlp_dims: [128,2]
+  encoder_mlp_activation: 'leaky_relu'
+  decoder_activation: 'leaky_relu'
+  decoder_mlp_activation: 'leaky_relu'
+  conditionnal: True
+  nb_classes: 10
+optimization:
+  lr: 0.0001
+  kl_weight:  1
+  criterion: 'bce'
+  reduction: 'sum'
+  epochs: 20
+  weight_decay: 0.00001
+

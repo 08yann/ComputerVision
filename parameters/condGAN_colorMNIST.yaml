@@ -1,0 +1,20 @@
+dataset:
+  name: 'colorMNIST'
+  batch_size: 256
+  img_size: 28
+  mean: 0.5
+  std: 0.5
+model:
+  name: 'GAN'
+  latent_dim: 20
+  strides: [2,2]
+  kernels: [7,3]
+  nb_channels: [64,128]
+  dropout: 0.4
+  conditionnal: True
+optimization:
+  lr_discriminator: 0.0001
+  lr_generator: 0.0001
+  epochs: 20
+  beta_1: 0.5
+  beta_2: 0.999
