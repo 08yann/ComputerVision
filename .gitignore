@@ -19,3 +19,4 @@ ResNet_training.ipynb
 rnn_torchviz
 VAE_training.ipynb
 *.gv.png
+GAN_trainingAFHQ.ipynb

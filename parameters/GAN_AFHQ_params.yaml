@@ -1,0 +1,21 @@
+dataset:
+  name: 'AFHQ'
+  batch_size: 32
+  img_size: 128
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+model:
+  name: 'GAN'
+  kernels: [7,3,3,3,3]
+  latent_dim: 100
+  strides: [2,2,2,2,2]
+  nb_channels: [64,128, 256, 256, 512]
+  dropout: 0.4
+  conditionnal: False
+optimization:
+  lr_generator: 0.0005
+  lr_discriminator: 0.0005
+  epochs: 30
+  beta_1: 0.5
+  beta_2: 0.999
+

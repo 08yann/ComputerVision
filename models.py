@@ -6,6 +6,7 @@ import math
 import copy
 import abc
 from utils import ELBO_gaussian
+import tqdm
 ####################################################
 ### Compute output size of convolutions
 
@@ -265,7 +266,7 @@ class GAN(nn.Module):
 
         x_fake = self.generator(noise, label)
 
-        optimizer[0].zero_grad()
+        self.discriminator.zero_grad()
         out_real = self.discriminator(x,label)
         loss_D = self.loss_function(out_real, torch.ones(x.shape[0],1).to(device))
         loss_D.backward()
@@ -280,31 +281,53 @@ class GAN(nn.Module):
 
         loss_discriminator += loss_D.item()
 
-        optimizer[1].zero_grad()
+        self.generator.zero_grad()
         out_gen = self.discriminator(x_fake, label)
         loss_G = self.loss_function(out_gen, torch.ones(out_gen.shape[0],1).to(device))
         loss_G.backward()
         optimizer[1].step()
 
         loss_generator = loss_G.item()
-        '''optimizer[0].zero_grad()
+        '''
+        device = self.generator.ln.bias.device
+        loss_fn = nn.BCELoss()
+        for e in range(self.optim_params['epochs']):
+            print('epoch: '+str(e), flush = True)
+            pbar = tqdm.tqdm(dataloader)
+            for x, _ in pbar:
+                B = x.shape[0]
+                x = x.to(device)
+                noise = torch.randn((B, self.latent_dim)).to(device)
 
-        B = x[1].shape[0]
-        y_D = torch.cat([torch.ones(B,1), torch.zeros(B,1)], dim = 0).to(x[0].device)
-        loss_D = self.loss_function(x[0], y_D)
-        loss_D.backward()
-        optimizer[0].step()
+                x_fake = self.generator(noise)
 
-        loss_discriminator = loss_D.item()
+                self.discriminator.zero_grad()
+                out_real = self.discriminator(x)
+                y = torch.ones(B,1).to(device)
+                loss_D = loss_fn(out_real, y)
+                loss_D.backward()
+                optimizer[0].step()
 
-        optimizer[1].zero_grad()
-        out_gen = self.discriminator(x[1])
-        loss_G = self.loss_function(out_gen, torch.ones(B,1).to(x[1].device))
-        loss_G.backward()
-        optimizer[1].step()
+                loss_discriminator = loss_D.item()
 
-        loss_generator = loss_G.item()
-'''
+                out_fake = self.discriminator(x_fake.detach())
+                y = torch.zeros(B,1).to(device)
+                loss_D = loss_fn(out_fake, y)
+                loss_D.backward()
+                optimizer[0].step()
+
+                loss_discriminator += loss_D.item()
+
+                self.generator.zero_grad()
+                out_gen = self.discriminator(x_fake)
+                y = torch.ones(B,1).to(device)
+                loss_G = loss_fn(out_gen, y)
+                loss_G.backward()
+                optimizer[1].step()
+
+
+                pbar.set_description(f'GAN epoch: %.3f Loss D: %.3f Loss G: %.3f' % (e,loss_discriminator, loss_G.item()))'''
+        
         return loss_discriminator, loss_generator
 
     @torch.no_grad()

@@ -287,6 +287,7 @@ def training_steps(model, dataloader, unnormalize = None, classification = False
     device = torch.device('cuda' if next(model.parameters()).is_cuda else 'cpu')
     losses = []
     optimizer = configure_optimizer(model)
+    
     loss_idx = 0
     loss_dict = {}
     for e in range(model.optim_params['epochs']):
@@ -294,7 +295,10 @@ def training_steps(model, dataloader, unnormalize = None, classification = False
         for x, label in pbar:
             if type(optimizer) == list:
                 x = x.to(device)
-                loss_discriminator, loss_generator = model.gan_step(optimizer, x, label.to(device))
+                if model.conditionnal:
+                    loss_discriminator, loss_generator = model.gan_step(optimizer, x, label.to(device))
+                else:
+                    loss_discriminator, loss_generator = model.gan_step(optimizer, x)
                 pbar.set_description(f'GAN epoch: %.3f Loss D: %.3f Loss G: %.3f' % (e,loss_discriminator, loss_generator))
 
             else:
@@ -316,7 +320,7 @@ def training_steps(model, dataloader, unnormalize = None, classification = False
     if 'commitment_loss' in loss_dict.keys():
         # This means we have a VQ-VAE and we still need to train the model to generate into the latent space
         losses_generator = train_latent_generator(model, dataloader)
-        
+    
     return losses
 
 def ELBO_gaussian(mu, logvar):
