@@ -155,9 +155,7 @@ class MnistQuantizedEncoding(Dataset):
         else:
             self.path = dir_name + fname_encodings
         self.size_quant = size_quant
-        self.quantized = self.load_quantized()
-
- 
+        self.quantized = self.load_quantized() 
 
     def load_quantized(self):
         mnist_encodings = pickle.load(open(self.path, 'rb'))
@@ -300,7 +298,6 @@ def training_steps(model, dataloader, unnormalize = None, classification = False
                 else:
                     loss_discriminator, loss_generator = model.gan_step(optimizer, x)
                 pbar.set_description(f'GAN epoch: %.3f Loss D: %.3f Loss G: %.3f' % (e,loss_discriminator, loss_generator))
-
             else:
                 out = model(x.to(device), label.to(device))
                 loss_dict = model.loss_function(out, label.to(device)) if classification else model.loss_function(out, x.to(device),unnormalize)

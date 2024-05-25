@@ -18,10 +18,10 @@ model:
   size_second_stage: 3
   conditionnal: False
 optimization:
-  lr: 0.0005
+  lr: 0.001
   kl_weight:  1
   criterion: 'bce'
   reduction: 'sum'
-  epochs: 20
+  epochs: 50
   weight_decay: 0
   beta_1: 0.5

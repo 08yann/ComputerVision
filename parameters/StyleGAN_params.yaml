@@ -1,0 +1,13 @@
+model:
+    latent_dim: 160
+    start_channel: 64
+    nb_blocks_discr: 2
+    nb_layers_mapping: 4
+    init_channel: 128
+    start_size: 7
+optimization:
+    lr_generator: 0.001
+    lr_discriminator: 0.001
+    epochs: 50
+    gen_beta_1: 0.1
+    discr_beta_1: 0

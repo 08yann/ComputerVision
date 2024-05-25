@@ -13,9 +13,9 @@ model:
   dropout: 0.4
   conditionnal: False
 optimization:
-  lr_generator: 0.0005
-  lr_discriminator: 0.0005
-  epochs: 30
+  lr_generator: 0.0001
+  lr_discriminator: 0.0001
+  epochs: 50
   beta_1: 0.5
   beta_2: 0.999
 

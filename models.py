@@ -262,20 +262,21 @@ class GAN(nn.Module):
 
     def gan_step(self,optimizer, x, label = None):
         device = x.device
-        noise = torch.randn((x.shape[0], self.latent_dim)).to(device)
+        B = x.shape[0]
+        noise = torch.randn((B, self.latent_dim)).to(device)
 
         x_fake = self.generator(noise, label)
 
         self.discriminator.zero_grad()
         out_real = self.discriminator(x,label)
-        loss_D = self.loss_function(out_real, torch.ones(x.shape[0],1).to(device))
+        loss_D = self.loss_function(out_real, torch.ones(B,1).to(device))
         loss_D.backward()
         optimizer[0].step()
 
         loss_discriminator = loss_D.item()
 
         out_fake = self.discriminator(x_fake.detach(), label)
-        loss_D = self.loss_function(out_fake, torch.zeros(out_fake.shape[0], 1).to(device))
+        loss_D = self.loss_function(out_fake, torch.zeros(B,1).to(device))
         loss_D.backward()
         optimizer[0].step()
 
@@ -283,7 +284,7 @@ class GAN(nn.Module):
 
         self.generator.zero_grad()
         out_gen = self.discriminator(x_fake, label)
-        loss_G = self.loss_function(out_gen, torch.ones(out_gen.shape[0],1).to(device))
+        loss_G = self.loss_function(out_gen, torch.ones(B,1).to(device))
         loss_G.backward()
         optimizer[1].step()
 
@@ -621,7 +622,7 @@ class VAE_complex(nn.Module):
         x_pred = self.decoder(z)
         return x_pred
 
-    def eval_manifold(self, nb_points = 900):
+    def eval_manifold(self, unnormalize, nb_points = 900):
         assert nb_points == int(math.sqrt(nb_points)**2)
 
         list_grids = []
@@ -708,6 +709,31 @@ class MultiStage_VAE(nn.Module):
         loss_kl = ELBO_gaussian(x_out[2], x_out[3])
         loss = loss_mse + self.optim_params['kl_weight']*loss_kl + loss_l1
         return {'loss':loss, 'recon_loss':loss_mse, 'kl_loss':loss_kl, 'l1__loss': loss_l1}
+
+    @torch.no_grad()
+    def eval_manifold(self, unnormalize , nb_points = 900):
+        assert nb_points == int(math.sqrt(nb_points)**2)
+
+        list_grids = []
+
+
+        grid_side = int(math.sqrt(nb_points))
+        xs = torch.linspace(-10,10,grid_side)
+        ys = torch.linspace(-10,10,grid_side)
+
+        xs, ys = torch.meshgrid([xs,ys])
+        xs = xs.reshape(-1,1)
+        ys = ys.reshape(-1,1)
+        device = self.second_stage[0].conv1.weight.device
+        zs = torch.cat([xs,ys], dim = -1).to(device)
+
+        generated_img = self.decoder(zs)
+        generated_img = unnormalize(generated_img).cpu()
+        grid = torchvision.utils.make_grid(generated_img, nrow = grid_side)
+        list_grids.append(grid)
+
+
+        return grid
 
 
 
@@ -860,7 +886,7 @@ class VAE_3D(nn.Module):
 
 
     @torch.no_grad()
-    def eval_manifold(self, nb_points = 900):
+    def eval_manifold(self, unnormalize, nb_points = 900):
         assert nb_points == int(math.sqrt(nb_points)**2)
 
         list_grids = []
@@ -883,7 +909,7 @@ class VAE_3D(nn.Module):
 
             labels = torch.ones(nb_points,).to(device).long()* label_val
             generated_img = self.decoder(zs, labels)
-            generated_img = ((generated_img.cpu() + 1)/2)
+            generated_img = unnormalize(generated_img).cpu()
             grid = torchvision.utils.make_grid(generated_img, nrow = grid_side)
             list_grids.append(grid)
 
@@ -1112,41 +1138,44 @@ class MaskedConv2d(nn.Conv2d):
 
 
 class PixelCNN(nn.Module):
-    def __init__(self, nb_blocks = 15, h = 32, nb_classes = 2, kernel = 3):
+    def __init__(self, config, img_shape, nb_classes):
         super().__init__()
-        self.nb_classes = nb_classes
+        self.nb_out = config['model']['nb_out']
+        self.kernel = config['model']['kernel']
+        self.channel_dim = config['model']['channel_dim']
+        self.optim_params = config['optimization']
 
-        self.conv_init = MaskedConv2d('A',1, 2*h, kernel_size = 7, padding = 3)
+        self.conv_init = MaskedConv2d('A',1, 2*self.channel_dim, kernel_size = 7, padding = 3)
 
         self.blocks = nn.ModuleList()
         mask = 'B'
-        for _ in range(nb_blocks):
+        for _ in range(config['model']['nb_layers']):
             self.blocks.append(nn.Sequential(
                 nn.ReLU(),
-                MaskedConv2d(mask, 2*h, h, kernel_size = 1),
-                nn.BatchNorm2d(h),
+                MaskedConv2d(mask, 2*self.channel_dim, self.channel_dim, kernel_size = 1),
+                nn.BatchNorm2d(self.channel_dim),
                 nn.ReLU(),
-                MaskedConv2d(mask, h, h, kernel_size = kernel, padding = kernel//2),
-                nn.BatchNorm2d(h),
+                MaskedConv2d(mask, self.channel_dim, self.channel_dim, kernel_size = self.kernel, padding = self.kernel//2),
+                nn.BatchNorm2d(self.channel_dim),
                 nn.ReLU(),
-                MaskedConv2d(mask, h, 2*h, kernel_size = 1),
-                nn.BatchNorm2d(2*h)
+                MaskedConv2d(mask, self.channel_dim, 2*self.channel_dim, kernel_size = 1),
+                nn.BatchNorm2d(2*self.channel_dim)
             ))
             
         self.conv_out = nn.Sequential(
             nn.ReLU(),
-            MaskedConv2d(mask, 2*h, h, kernel_size = 1),
+            MaskedConv2d(mask, 2*self.channel_dim, self.channel_dim, kernel_size = 1),
             nn.ReLU(),
-            MaskedConv2d(mask, h, h, kernel_size = 1),
-            MaskedConv2d(mask, h, self.nb_classes, kernel_size = 1)
+            MaskedConv2d(mask, self.channel_dim, self.channel_dim, kernel_size = 1),
+            MaskedConv2d(mask, self.channel_dim, self.nb_out, kernel_size = 1)
         )
 
-        if self.nb_classes == 2:
+        if self.nb_out == 2:
             self.conv_out.append(nn.Sigmoid())
         else:
             self.conv_out.append(nn.Softmax(dim = 1))
 
-    def forward(self, x):
+    def forward(self, x, label = None):
         x = self.conv_init(x)
 
         for conv in self.blocks:
@@ -1156,16 +1185,29 @@ class PixelCNN(nn.Module):
     
         return out
 
+    def loss_function(self, x_out, x_true, unnormalize):
+        try:
+            reduc =  self.optim_params['reduction']
+        except:
+            reduc = 'mean' 
+        if self.optim_params['criterion'] == 'bce':
+            loss_mse = F.binary_cross_entropy(x_out, unnormalize(x_true).long().float())
+        else:
+            loss_mse = F.mse_loss(x_out[0], x_true, reduction=reduc)
+        loss = loss_mse
+        return {'loss':loss, 'recon_loss':loss_mse}
+
+
     @torch.no_grad()
     def generate(self, nb_samples, img_size):
         img = torch.zeros(nb_samples, 1, img_size, img_size).to(self.conv_out[1].bias.device)
         for i in range(img_size):
             for j in range(img_size):
                 logits = self(2*(img-.5))
-                if self.nb_classes == 2:
+                if self.nb_out == 2:
                     img[:,:,i,j] = torch.bernoulli(logits[:, :, i, j], out=logits[:, :, i, j])
                 else:
-                    img[:,:,i,j] = torch.multinomial(logits[:, :, i, j], num_samples=1)/(self.nb_classes-1)
+                    img[:,:,i,j] = torch.multinomial(logits[:, :, i, j], num_samples=1)/(self.nb_out-1)
 
         return img
 

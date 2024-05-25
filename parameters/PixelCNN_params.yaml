@@ -1,0 +1,16 @@
+dataset:
+  name: 'MNIST'
+  batch_size: 32
+  img_size: 28
+  mean: 0.5
+  std: 0.5
+model:
+  name: 'PixelCNN'
+  nb_layers: 12
+  channel_dim: 32
+  nb_out: 1
+  kernel: 3
+optimization:
+  criterion: 'bce'
+  epochs: 10
+  lr: 0.005
