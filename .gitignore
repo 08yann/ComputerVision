@@ -20,3 +20,6 @@ rnn_torchviz
 VAE_training.ipynb
 *.gv.png
 GAN_trainingAFHQ.ipynb
+VQ_VAE_training.ipynb
+GAN_trainingMNIST.ipynb
+PixelCNN_trainingMNIST.ipynb
