@@ -7,7 +7,7 @@ dataset:
 model:
   name: 'MultiStage_VAE'
   encoder_kernels: [7,3,3]
-  encoder_strides: [2,2,2]
+  encoder_strides: [2,2,1]
   encoder_size_blocks: 1
   avgpool: False
   maxpool_stride: 0
@@ -15,13 +15,11 @@ model:
   latent_dim: 2
   decoder_channels: [64,32,16]
   decoder_nb_blockconvs: 0
-  size_second_stage: 3
+  size_second_stage: 2
   conditionnal: False
 optimization:
-  lr: 0.001
-  kl_weight:  1
+  lr: 0.0005
+  kl_weight: 1
   criterion: 'bce'
   reduction: 'sum'
-  epochs: 50
-  weight_decay: 0
-  beta_1: 0.5
+  epochs: 30

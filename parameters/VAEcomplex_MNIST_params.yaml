@@ -17,7 +17,7 @@ model:
   latent_dim: 2
   decoder_channels: [64, 32]
   decoder_nb_blockconvs: 0
-  conditionnal: False
+  conditionnal: True
 optimization:
   lr: 0.001
   kl_weight:  1

@@ -244,7 +244,7 @@ class Annealizer:
 
 
 def load_dataset(config, training = True):
-    assert config['dataset']['name'] in ('MNIST','colorMNIST', 'AFHQ', 'OXFORD', 'CelebA')
+    assert config['dataset']['name'] in ('MNIST','colorMNIST', 'AFHQ', 'OXFORD', 'CelebA', 'CIFAR10', 'FashionMNIST')
     try:
         mean, std = config['dataset']['mean'], config['dataset']['std']
     except: 
@@ -257,6 +257,10 @@ def load_dataset(config, training = True):
         dataset = torchvision.datasets.MNIST(root = './data/',train = training, download = True, transform=torchvision.transforms.Compose([transforms.Resize((config['dataset']['img_size'],config['dataset']['img_size'])),torchvision.transforms.ToTensor(), transforms.Normalize(mean = mean, std = std)]))
     elif config['dataset']['name'] == 'colorMNIST':
         dataset = MNIST_colorized(training=training, img_size=config['dataset']['img_size'], mean = mean, std = std)
+    elif config['dataset']['name'] == 'CIFAR10':
+        dataset = torchvision.datasets.CIFAR10(root = './data/', download = True, train = training, transform=torchvision.transforms.Compose([transforms.Resize((config['dataset']['img_size'],config['dataset']['img_size'])),torchvision.transforms.ToTensor(),transforms.Normalize(mean = mean, std = std)]))
+    elif config['dataset']['name'] == 'FashionMNIST':
+        dataset = torchvision.datasets.FashionMNIST(root = './data/',train = training, download = True, transform=torchvision.transforms.Compose([transforms.Resize((config['dataset']['img_size'],config['dataset']['img_size'])),torchvision.transforms.ToTensor(), transforms.Normalize(mean = mean, std = std)]))
     elif config['dataset']['name'] == 'OXFORD':
         split = 'trainval' if training else 'test'
         dataset = torchvision.datasets.OxfordIIITPet(root = './data/', download = True, split = split, transform=torchvision.transforms.Compose([transforms.Resize((config['dataset']['img_size'],config['dataset']['img_size'])),torchvision.transforms.ToTensor(),transforms.Normalize(mean = mean, std = std)]))
@@ -291,13 +295,10 @@ def training_steps(model, dataloader, unnormalize = None, classification = False
     for e in range(model.optim_params['epochs']):
         pbar = tqdm.tqdm(dataloader)
         for x, label in pbar:
-            if type(optimizer) == list:
-                x = x.to(device)
-                if model.conditionnal:
-                    loss_discriminator, loss_generator = model.gan_step(optimizer, x, label.to(device))
-                else:
-                    loss_discriminator, loss_generator = model.gan_step(optimizer, x)
+            if type(optimizer) == dict:
+                loss_discriminator, loss_generator = gan_step(model, optimizer, x.to(device), label.to(device))
                 pbar.set_description(f'GAN epoch: %.3f Loss D: %.3f Loss G: %.3f' % (e,loss_discriminator, loss_generator))
+                losses.append(loss_generator)
             else:
                 out = model(x.to(device), label.to(device))
                 loss_dict = model.loss_function(out, label.to(device)) if classification else model.loss_function(out, x.to(device),unnormalize)
@@ -320,11 +321,36 @@ def training_steps(model, dataloader, unnormalize = None, classification = False
     
     return losses
 
+def gan_step(model, optimizers, x_real, labels = None):
+    device = x_real.device
+    B = x_real.shape[0]
+    noise = torch.randn((B, model.latent_dim)).to(device)
+    x_fake = model.generator(noise, labels)
+    model.discriminator.zero_grad()
+    out_fake = model.discriminator(x_fake.detach(), labels)
+    out_real = model.discriminator(x_real, labels)
+    loss_fake = model.loss_function(out_fake, torch.zeros(B).to(device))
+    loss_real = model.loss_function(out_real, torch.ones(B).to(device))
+
+    loss_discr = (loss_fake + loss_real)/2
+    loss_discr.backward()
+    optimizers['discriminator'].step()
+
+    model.generator.zero_grad()
+    x_fake = model.generator(noise, labels)
+    out = model.discriminator(x_fake, labels)
+    loss_gen = model.loss_function(out, torch.ones(B).to(device))
+
+    loss_gen.backward()
+    optimizers['generator'].step()
+    
+    return loss_discr.item(), loss_gen.item()
+
 def ELBO_gaussian(mu, logvar):
     return -torch.mean(0.5 * torch.sum(1-mu**2 - logvar.exp() +logvar, dim = 1), dim = 0)
 
 @torch.no_grad
-def evaluation_step(model, test_dataloader,unnormalize, classification = False, logger = None):
+def evaluation_step(model, test_dataloader,unnormalize, name_experiment, classification = False, logger = None, save_output =False):
     device = torch.device('cuda' if next(model.parameters()).is_cuda else 'cpu')
     model.eval()
     loss = 0
@@ -338,7 +364,7 @@ def evaluation_step(model, test_dataloader,unnormalize, classification = False, 
         if classification:
             acc += loss_dict['accuracy']
 
-    if logger is not None:
+    if (logger is not None) or save_output:
         batch = next(iter(test_dataloader))
         with torch.no_grad():
             out = model(batch[0].to(device), batch[1].to(device))
@@ -346,11 +372,12 @@ def evaluation_step(model, test_dataloader,unnormalize, classification = False, 
         grid_out = torchvision.utils.make_grid(unnormalize(out[0]).cpu(), nrow = test_dataloader.batch_size // 2)
         img_grid = torch.concat([grid_in, grid_out], dim = 1)
         plt.imshow(img_grid.cpu().permute(1,2,0))
-        logger.add_image('Test comparison', img_grid)
-
-        logger.add_scalar('Loss eval', loss/len(test_dataloader.dataset))
-        if classification:
-            logger.add_scalar('Accuracy eval', acc/len(test_dataloader.dataset))
+        torchvision.utils.save_image(img_grid, './output_images/'+name_experiment+'_reconstruction.png')
+        if logger is not None:
+            logger.add_image('Test comparison', img_grid)
+            logger.add_scalar('Loss eval', loss/len(test_dataloader.dataset))
+            if classification:
+                logger.add_scalar('Accuracy eval', acc/len(test_dataloader.dataset))
 
         if model.latent_dim == 2:
             batch, label = next(iter(test_dataloader))
@@ -359,9 +386,10 @@ def evaluation_step(model, test_dataloader,unnormalize, classification = False, 
             plt.figure(1)
             plt.scatter(z[:,0], z[:,1], c= list(label.numpy()), cmap = 'viridis')
             plt.colorbar()
-            logger.add_figure('Latent representation', plt.gcf())
+            plt.savefig('./output_images/'+name_experiment+'_latent_representation.png')
 
-
+            if logger is not None:
+                logger.add_figure('Latent representation', plt.gcf())
     else:
         if classification:
             print(f'Accuracy: %.3f, Loss: %.3f' % (acc/len(test_dataloader.dataset), loss/len(test_dataloader.dataset)))
@@ -384,8 +412,10 @@ def configure_optimizer(model):
         weight_decay = 0
 
     if 'lr_discriminator' in model.optim_params:
-        optimizers = [torch.optim.AdamW(model.discriminator.parameters(), lr = model.optim_params['lr_discriminator'], weight_decay = weight_decay, betas = (beta_1, beta_2))]
-        optimizers.append(torch.optim.AdamW(model.generator.parameters(), lr = model.optim_params['lr_generator'], weight_decay = weight_decay, betas = (beta_1, beta_2)))
+        optimizers = {
+            'discriminator': torch.optim.AdamW(model.discriminator.parameters(), lr = model.optim_params['lr_discriminator'], weight_decay = weight_decay, betas = (beta_1, beta_2)),
+            'generator': torch.optim.AdamW(model.generator.parameters(), lr = model.optim_params['lr_generator'], weight_decay = weight_decay, betas = (beta_1, beta_2))
+        }
         return optimizers
 
     optimizer = torch.optim.AdamW(model.parameters(), lr =model.optim_params['lr'], weight_decay = weight_decay, betas=(beta_1,beta_2))

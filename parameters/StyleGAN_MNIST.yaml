@@ -1,4 +1,11 @@
+dataset:
+    name: 'MNIST'
+    batch_size: 256
+    img_size: 28
+    mean: 0.5
+    std: 0.5
 model:
+    name: StyleGAN
     latent_dim: 160
     start_channel: 64
     nb_blocks_discr: 2
@@ -8,6 +15,6 @@ model:
 optimization:
     lr_generator: 0.001
     lr_discriminator: 0.001
-    epochs: 50
+    epochs: 20
     gen_beta_1: 0.1
     discr_beta_1: 0

@@ -53,7 +53,6 @@ class ResBlock(nn.Module):
         if self.downsample:
             x = self.bnorm_skip(self.conv_downsample(x))
         out = F.relu(out + x)
-
         return out
 
 class ResNet(nn.Module):
@@ -231,19 +230,17 @@ class GAN(nn.Module):
         except:
             self.conditionnal = False
 
-
         self.discriminator = Discriminator(config, self.img_shape,self.nb_classes, self.conditionnal)
-
         self.generator = Generator(config,  self.img_shape, self.discriminator.out_size,self.nb_classes, self.conditionnal)
-
+        '''        
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.normal_(m.weight, 0.0, 0.02)
             elif isinstance(m, nn.BatchNorm2d):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
+        '''
 
-    
     def forward(self, x_real, label = None):
         B = x_real.shape[0]
         device = self.generator.ln.bias.device
@@ -256,87 +253,21 @@ class GAN(nn.Module):
         out_discriminator = self.discriminator(x_cat,torch.cat([label, label], dim = 0))
         return out_discriminator,  x_fake
 
-    def loss_function(self, x_out, y):        
-        loss = F.binary_cross_entropy(x_out, y)
+        loss_kl = ELBO_gaussian(x_out[1], x_out[2])
+        loss = loss_mse + self.optim_params['kl_weight']*loss_kl
+        return {'loss':loss, 'recon_loss':loss_mse, 'kl_loss':loss_kl}
+
+    def loss_function(self, x_out, y):
+        criterion = nn.BCEWithLogitsLoss()
+        loss = criterion(x_out.squeeze(),y)
         return loss
-
-    def gan_step(self,optimizer, x, label = None):
-        device = x.device
-        B = x.shape[0]
-        noise = torch.randn((B, self.latent_dim)).to(device)
-
-        x_fake = self.generator(noise, label)
-
-        self.discriminator.zero_grad()
-        out_real = self.discriminator(x,label)
-        loss_D = self.loss_function(out_real, torch.ones(B,1).to(device))
-        loss_D.backward()
-        optimizer[0].step()
-
-        loss_discriminator = loss_D.item()
-
-        out_fake = self.discriminator(x_fake.detach(), label)
-        loss_D = self.loss_function(out_fake, torch.zeros(B,1).to(device))
-        loss_D.backward()
-        optimizer[0].step()
-
-        loss_discriminator += loss_D.item()
-
-        self.generator.zero_grad()
-        out_gen = self.discriminator(x_fake, label)
-        loss_G = self.loss_function(out_gen, torch.ones(B,1).to(device))
-        loss_G.backward()
-        optimizer[1].step()
-
-        loss_generator = loss_G.item()
-        '''
-        device = self.generator.ln.bias.device
-        loss_fn = nn.BCELoss()
-        for e in range(self.optim_params['epochs']):
-            print('epoch: '+str(e), flush = True)
-            pbar = tqdm.tqdm(dataloader)
-            for x, _ in pbar:
-                B = x.shape[0]
-                x = x.to(device)
-                noise = torch.randn((B, self.latent_dim)).to(device)
-
-                x_fake = self.generator(noise)
-
-                self.discriminator.zero_grad()
-                out_real = self.discriminator(x)
-                y = torch.ones(B,1).to(device)
-                loss_D = loss_fn(out_real, y)
-                loss_D.backward()
-                optimizer[0].step()
-
-                loss_discriminator = loss_D.item()
-
-                out_fake = self.discriminator(x_fake.detach())
-                y = torch.zeros(B,1).to(device)
-                loss_D = loss_fn(out_fake, y)
-                loss_D.backward()
-                optimizer[0].step()
-
-                loss_discriminator += loss_D.item()
-
-                self.generator.zero_grad()
-                out_gen = self.discriminator(x_fake)
-                y = torch.ones(B,1).to(device)
-                loss_G = loss_fn(out_gen, y)
-                loss_G.backward()
-                optimizer[1].step()
-
-
-                pbar.set_description(f'GAN epoch: %.3f Loss D: %.3f Loss G: %.3f' % (e,loss_discriminator, loss_G.item()))'''
-        
-        return loss_discriminator, loss_generator
-
+    
     @torch.no_grad()
     def sample(self, nb_images, label = None):
         device = torch.device('cuda')
         if self.conditionnal:
             if label is None:
-                label = torch.random.randint(self.nb_classes, nb_images).to(device)
+                label = torch.randint(0, self.nb_classes,(nb_images,)).to(device)
         z = torch.randn((nb_images, self.latent_dim)).to(device)
         return self.generator(z, label)
 
@@ -454,6 +385,7 @@ class VAE_complex(nn.Module):
 
         self.optim_params = config['optimization']
         self.img_shape = img_shape
+        self.nb_classes = nb_classes
         nb_convs = len(config['model']['encoder_kernels'])
         assert len(config['model']['encoder_strides']) == nb_convs
         assert len(config['model']['encoder_channels']) == nb_convs
@@ -661,8 +593,10 @@ class MultiStage_VAE(nn.Module):
         self.img_shape = img_shape
         self.optim_params = config['optimization']
         self.config = config
+
         self.vae = VAE_complex(self.config, img_shape, nb_classes)
         self.latent_dim = self.vae.latent_dim
+        self.conditionnal = self.vae.conditionnal
         size_second_stage = self.config['model']['size_second_stage']
         self.second_stage = nn.ModuleList([VAE_Block(img_shape[0], img_shape[0],kernel=3, stride=1) for _ in range(size_second_stage-1)])
         self.second_stage.append(VAE_Block(img_shape[0], img_shape[0],kernel=3, stride=1, last_activ = nn.Tanh()))
@@ -797,10 +731,8 @@ class VAE_3D(nn.Module):
                                         nn.BatchNorm2d(self.nb_channels[i+1]),
                                         activation_dict[self.config['encoder_activation']]) for i in range(nb_convs)])
 
-
         self.mlp_mu = nn.ModuleList([nn.Sequential(nn.Linear(enc_mlp_dims[i], enc_mlp_dims[i+1]), activation_dict[self.config['encoder_mlp_activation']] if i<len(enc_mlp_dims)-2 else nn.Identity()) for i in range(len(enc_mlp_dims)-1)])
         self.mlp_logvar = nn.ModuleList([nn.Sequential(nn.Linear(enc_mlp_dims[i], enc_mlp_dims[i+1]), activation_dict[self.config['encoder_mlp_activation']] if i<len(enc_mlp_dims)-2 else nn.Identity()) for i in range(len(enc_mlp_dims)-1)])
-        
 
         self.dec_convs = nn.ModuleList([nn.Sequential(
                                             nn.ConvTranspose2d(self.nb_channels[-i-1], self.nb_channels[-i-2], kernel_size=self.dec_kernels[i],stride=self.config['encoder_strides'][-i-1], padding=self.pad[-i-1], output_padding=self.output_pad[i]),
@@ -879,7 +811,7 @@ class VAE_3D(nn.Module):
             z = torch.randn((nb_images, self.latent_dim)).to(device)
         if self.conditionnal:
             if label is None:
-                label = torch.random.randint(0, self.nb_classes,(nb_images))
+                label = torch.randint(0, self.nb_classes,(nb_images,)).to(device)
 
         x_pred = self.decoder(z, label)
         return x_pred
@@ -958,7 +890,7 @@ class  VQ_VAE(nn.Module):
         self.latent_dim = config['model']['latent_dim']
         self.size_codebook = config['model']['size_codebook']
         self.generator_name = config['latent_generator']['model']['name']
-
+        self.conditionnal = config['model']['conditionnal']
         self.img_shape = img_shape
         self.nb_classes = nb_classes
         assert len(config['model']['encoder_strides']) == self.nb_convs

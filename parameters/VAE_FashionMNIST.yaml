@@ -1,0 +1,24 @@
+dataset:
+  name: 'FashionMNIST'
+  batch_size: 256
+  img_size: 32
+  mean: 0.5
+  std: 0.5
+model:
+  name: 'VAE_3D'
+  encoder_kernels: [7,3,3]
+  encoder_strides: [2,2,2]
+  encoder_channels: [16,32,64]
+  encoder_activation: 'leaky_relu'
+  encoder_mlp_dims: [128,2]
+  encoder_mlp_activation: 'leaky_relu'
+  decoder_activation: 'leaky_relu'
+  decoder_mlp_activation: 'leaky_relu'
+  conditionnal: True
+optimization:
+  lr: 0.005
+  kl_weight:  0.1
+  criterion: 'bce'
+  reduction: 'sum'
+  epochs: 30
+  weight_decay: 0.00001

@@ -136,7 +136,7 @@ class StyleGenerator(nn.Module):
         self.mapping = MappingNetwork(latent_dim, nb_layers_mapping)
         self.synthesis = SynthesisNetwork(img_channel, latent_dim, init_channel, start_size, nb_blocks)
 
-    def forward(self, z):
+    def forward(self, z, label = None):
         w = self.mapping(z)
         x = self.synthesis(w)
         return x
@@ -186,7 +186,7 @@ class Discriminator(nn.Module):
             nn.Linear(2*channel, 1)
         )
 
-    def forward(self, x):
+    def forward(self, x, label = None):
         x = self.init_conv(x)
         for block in self.blocks:
             x = block(x)
@@ -204,6 +204,7 @@ class StyleGAN(nn.Module):
         self.discriminator = Discriminator(self.img_channel, config['model']['start_channel'], config['model']['nb_blocks_discr'])
         self.generator = StyleGenerator(config['model']['latent_dim'], config['model']['nb_layers_mapping'], self.img_channel , config['model']['init_channel'], config['model']['start_size'], nb_blocks = 2)
         self.optim_params = config['optimization']
+        self.conditionnal = False
 
         self._get_gen_optimizer()
         self._get_discr_optimizer()
@@ -215,6 +216,8 @@ class StyleGAN(nn.Module):
     def _get_discr_optimizer(self):
         self.optim_discriminator = torch.optim.Adam(self.discriminator.parameters(), lr = self.optim_params['lr_discriminator'], betas = (self.optim_params['discr_beta_1'],0.99), eps = 1e-8)
 
+    def forward(x, labels= None):
+        return self.generator(x)
 
     def discriminator_loss(self, x_fake, x_real):
         device = x_fake.device
@@ -257,118 +260,14 @@ class StyleGAN(nn.Module):
         self.optim_generator.step()
 
         return loss.item()
-
-
-
-
-
-
-
-
-
-
-
-
-'''
-
-
-class Block(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel = 3, stride = 2):
-        self.conv0 = nn.Conv2d(in_channels, in_channels, kernel_size=kernel, padding=kernel//2)
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=kernel, padding=kernel//2, stride = stride)
-
-        self.skip = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride = stride, padding = kernel//2, bias=False)
-
-    def forward(self, x):
-        x_skip = self.skip(x)
-
-        x = F.leaky_relu(self.conv0(x))
-        x = F.leaky_relu(self.conv1(x))
-        x += x_skip
-        return x
-
-
-class Generator(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.latent_dim = 100
-        self.ln_start = nn.Linear(self.latent_dim, 49*128)
-
-        self.convT = nn.Sequential(
-            nn.ConvTranspose2d(128, 64, 3, stride = 2, padding = 1, output_padding=1),
-            nn.BatchNorm2d(64),
-            nn.LeakyReLU(),
-            nn.ConvTranspose2d(64,1,3,stride = 2, padding=1, output_padding=1),
-            nn.BatchNorm2d(64),
-            nn.LeakyReLU(),
-        )
-
-        self.out_conv = nn.Conv2d(1,1,3, padding=1)       
-
-
-    def forward(self,x):
-        x = self.ln_start(x)
-        x = x.view(x.shape[0], 128,7,7)
-        x = self.convT(x)
-        x = F.tanh(self.out_conv(x))
-        return x
-
-class Discriminator(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.convs = nn.Sequential(
-            nn.Conv2d(1, 64, 7, stride = 2, padding=3),
-            nn.BatchNorm2d(64),
-            nn.LeakyReLU(),
-            nn.Conv2d(64,128, 3, stride = 2, padding=1),
-            nn.BatchNorm2d(128),
-            nn.LeakyReLU(),
-        )
-
-
-        self.ln = nn.Linear(49*128, 1, bias = False)
     
-    def forward(self, x):
-        x = self.convs(x)
-        x = x.view(x.shape[0], -1)
-        x = self.ln(x)
-        return x
+    def loss_function(self,x_out, y):
+        criterion = nn.BCEWithLogitsLoss()
+        loss = criterion(x_out.squeeze(), y)
+        return loss
 
-class Classifier(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-        self.init = nn.Conv2d(1, 32, kernel_size=1)
-
-        self.blocks = nn.Sequential(
-            Block(32, 64),
-            Block(64,128)
-        )
-
-        self.conv_head = nn.Conv2d(128, 128, 3, padding=1)
-        self.fc1 = nn.Linear(128*49, 128)
-        self.fc2 = nn.Linear(128, 512)
-        self.out = nn.Linear(512,10)
-        
-    def forward(self,x):
-        x = F.leaky_relu(self.init(x))
-        x = self.blocks(x)
-
-        x = F.leaky_relu(self.conv_head(x))
-        x = F.leaky_relu(self.fc1(x.flatten(1)))
-        x = self.fc2(x)
-        x = self.out(x)
-        return x
-
-class DuDGAN(nn.Module):
-    def __init__(self, config, img_shape, nb_classes = 0):
-        super().__init__()
-        self.discriminator = Discriminator()
-
-        self.generator = Generator()
-        self.classifier = Classifier()
-
-    def forward(self, x):
-        return x
-
-'''
+    @torch.no_grad()
+    def sample(self, nb_images, label = None):
+        device = torch.device('cuda')
+        z = torch.randn((nb_images, self.latent_dim)).to(device)
+        return self.generator(z, label)

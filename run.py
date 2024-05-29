@@ -7,6 +7,7 @@ from utils import load_dataset, training_steps, evaluation_step
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 from models import *
+from DuDGan_model import StyleGAN
 import datetime
 import json
 import torchvision
@@ -14,7 +15,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-models_dict = {'VAE_1D':VAE_1D, 'VAE_3D':VAE_3D, 'VAE_complex':VAE_complex, 'MultiStage_VAE': MultiStage_VAE, 'ResNet': ResNet, 'VQ_VAE': VQ_VAE, 'PixelCNN': PixelCNN}
+models_dict = {'VAE_1D':VAE_1D, 'VAE_3D':VAE_3D, 'VAE_complex':VAE_complex, 'MultiStage_VAE': MultiStage_VAE, 'ResNet': ResNet, 'VQ_VAE': VQ_VAE, 'PixelCNN': PixelCNN, 'GAN':GAN, 'StyleGAN':StyleGAN}
 
 parser = argparse.ArgumentParser()
 
@@ -29,13 +30,20 @@ with open(args.fileconfig, 'rb') as f:
         config = yaml.safe_load(f)
     except yaml.YAMLError as exception:
         print(exception)
-name_experiment = config['model']['name']+'_' + config['dataset']['name']
-print(name_experiment)
+
 
 data, unnormalize, nb_classes = load_dataset(config)
 dataloader = DataLoader(data, batch_size = config['dataset']['batch_size'], shuffle = True)
 
 model = models_dict[config['model']['name']](config, img_shape = data[0][0].shape,  nb_classes=nb_classes).to(device)
+
+name_experiment = config['model']['name']
+if 'latent_generator' in config:
+    name_experiment += '_'+ config['latent_generator']['model']['name'] +'prior'
+name_experiment += '_cond_' if model.conditionnal else '_'
+name_experiment += config['dataset']['name']
+print(name_experiment)
+
 if args.path_weights is not None:
     model.load_state_dict(torch.load('./model_saves/' + args.path_weights+'.pth'))
     print('Weights loaded!')
@@ -62,7 +70,8 @@ if args.mod != 'sample':
 
     test_data, unnormalize, nb_classes = load_dataset(config, training=False)
     test_dataloader = DataLoader(test_data, batch_size = config['dataset']['batch_size'], shuffle = True)
-    evaluation_step(model, test_dataloader, unnormalize, classification, writer)
+    if 'GAN' not in name_experiment:
+        evaluation_step(model, test_dataloader, unnormalize, name_experiment, classification, writer, save_output = args.save_output)
 
     if not classification:
         img_sample = unnormalize(model.sample(nb_images = 16))
@@ -72,7 +81,13 @@ if args.mod != 'sample':
             torchvision.utils.save_image(sample_grid, './output_images/'+name_experiment+'.png')
         if model.latent_dim == 2:
             manifold = model.eval_manifold(unnormalize)
-            writer.add_image('Manifold', manifold)
-            if args.save_output:
-                torchvision.utils.save_image(manifold, './output_images/'+name_experiment+'_manifold.png')
+            if isinstance(manifold, list):
+                for label in range(model.nb_classes):
+                    writer.add_image('Manifold_label'+ str(label), manifold[label])
+                    if args.save_output:
+                        torchvision.utils.save_image(manifold[label], './output_images/'+name_experiment+'_manifold_label' + str(label)+'.png')
+            else:
+                writer.add_image('Manifold', manifold)
+                if args.save_output:
+                    torchvision.utils.save_image(manifold, './output_images/'+name_experiment+'_manifold.png')
 writer.close()
