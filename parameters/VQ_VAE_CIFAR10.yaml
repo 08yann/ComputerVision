@@ -12,7 +12,7 @@ model:
   encoder_activation: 'leaky_relu'
   decoder_activation: 'leaky_relu'
   conditionnal: False
-  latent_dim: 64
+  latent_dim: 128
   size_codebook: 512
 optimization:
   lr: 0.001

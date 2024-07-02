@@ -12,14 +12,14 @@ model:
   avgpool: False
   encoder_size_blocks: 2
   encoder_channels: [32,64,64]
-  latent_dim: 2
+  latent_dim: 100
   decoder_channels: [64,64, 32]
-  decoder_nb_blockconvs: 0
-  conditionnal: False
+  decoder_nb_blockconvs: 2
+  conditionnal: True
 optimization:
   lr: 0.0001
-  kl_weight:  0.1
+  kl_weight:  1
   criterion: 'bce'
   reduction: 'sum'
-  epochs: 20
+  epochs: 100
   weight_decay: 0

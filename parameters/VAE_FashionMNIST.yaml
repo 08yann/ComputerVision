@@ -19,6 +19,6 @@ optimization:
   lr: 0.005
   kl_weight:  0.1
   criterion: 'bce'
-  reduction: 'sum'
+  reduction: 'mean'
   epochs: 30
   weight_decay: 0.00001

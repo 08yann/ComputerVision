@@ -124,19 +124,25 @@ class Discriminator(nn.Module):
         nb_channels.insert(0,img_shape[0])
         if self.conditionnal:
             nb_channels[0] += self.nb_classes
+        self.out_size = img_shape[1]
+
 
         self.convs = nn.ModuleList()
         for i in range(nb_convs):
+            pad = config['model']['kernels'][i]//2
+            if config['model']['kernels'][i] % 2 == 0:
+                pad -= 1
+            self.out_size = (self.out_size - config['model']['kernels'][i]+ 2 *pad)// config['model']['strides'][i] + 1
+
+            if i == nb_convs-2:
+                self.start_gen_dim = self.out_size
+
             self.convs.append(nn.Sequential(
-                nn.Conv2d(nb_channels[i], nb_channels[i+1], config['model']['kernels'][i], stride = config['model']['strides'][i], padding = config['model']['kernels'][i]//2),
+                nn.Conv2d(nb_channels[i], nb_channels[i+1], config['model']['kernels'][i], stride = config['model']['strides'][i], padding = pad),
                 nn.BatchNorm2d(nb_channels[i+1]),
                 nn.LeakyReLU(negative_slope = 0.2)
             ))
-                    
-        self.out_size = img_shape[1]
-        for i in range(nb_convs):
-            self.out_size = (self.out_size - config['model']['kernels'][i]+ 2 *(config['model']['kernels'][i]//2))// config['model']['strides'][i] + 1
-        
+                            
         self.dropout = nn.Dropout(p = config['model']['dropout'])
         
         flatten_dim = self.out_size**2 * nb_channels[-1]
@@ -154,51 +160,56 @@ class Discriminator(nn.Module):
         for conv in self.convs:
             x = conv(x)
         x = self.dropout(x)
-        x = x.reshape(B, -1)
+        x = x.reshape(B,-1)
         
         logits = F.sigmoid(self.head(x))
         return logits
 
 
 class Generator(nn.Module):
-    def __init__(self,config,img_shape,out_discriminator_size,nb_classes, conditionnal = False):
+    def __init__(self,config,img_shape,start_gen_dim,nb_classes, conditionnal = False):
         super().__init__()
-        nb_convs = len(config['model']['nb_channels'])
+        nb_convs = len(config['model']['nb_channels'])-1
 
         self.conditionnal = conditionnal
         self.nb_classes = nb_classes
         self.img_shape = img_shape
-        self.out_discriminator_size = out_discriminator_size
-        nb_channels = copy.deepcopy(config['model']['nb_channels'])
-        nb_channels.insert(0, img_shape[0])
-        nb_channels.insert(-1, nb_channels[-1])
+        self.start_gen_dim = start_gen_dim
+        nb_channels = copy.deepcopy(config['model']['nb_channels'])[:-1]
         nb_channels = nb_channels[::-1]
-
+        nb_channels.insert(0, nb_channels[0])
 
         self.latent_dim = config['model']['latent_dim']
         if self.conditionnal:
             self.latent_dim += self.nb_classes
-        flatten_dim = self.out_discriminator_size**2* nb_channels[0]
-        self.channel_start = nb_channels[0]
-        out_size = img_shape[1]
+        out_size = [img_shape[1]]
         output_pad = []
         for i in range(nb_convs):
-            if out_size% 2==0:
-                output_pad.append(1)
-            else:
-                output_pad.append(0)
-            out_size = (out_size - config['model']['kernels'][i]+ 2 *(config['model']['kernels'][i]//2))// config['model']['strides'][i] + 1
+            pad = config['model']['kernels'][i]//2
+            if pad%2 == 0:
+                pad-=1
+            out_size.append((out_size[-1] - config['model']['kernels'][i]+ 2 *pad)// config['model']['strides'][i] + 1)
+        sizes = out_size[::-1]
 
         self.output_pad = output_pad[::-1]
-        self.ln = nn.Linear(self.latent_dim, flatten_dim)
+        self.init_convT = nn.Sequential(
+            nn.ConvTranspose2d(self.latent_dim, nb_channels[0], sizes[0], bias = False),
+            nn.BatchNorm2d(nb_channels[0]),
+            nn.LeakyReLU()
+        )
+
         self.convTs = nn.ModuleList()
         for i in range(nb_convs):
+            pad = config['model']['kernels'][-(i+2)]//2
+            if pad%2 == 0:
+                pad-= 1
+            output_pad =  sizes[i+1] - ((sizes[i] - 1) * config['model']['strides'][-(i+2)] + config['model']['kernels'][-(i+2)] -2* pad)
             self.convTs.append(nn.Sequential(
-                nn.ConvTranspose2d(nb_channels[i], nb_channels[i+1], config['model']['kernels'][-(i+1)], stride = config['model']['strides'][-(i+1)], padding = config['model']['kernels'][-(i+1)]//2, output_padding = self.output_pad[i]),
+                nn.ConvTranspose2d(nb_channels[i], nb_channels[i+1], config['model']['kernels'][-(i+2)], stride = config['model']['strides'][-(i+2)], padding = pad , output_padding = output_pad),
                 nn.BatchNorm2d(nb_channels[i+1]),
                 nn.LeakyReLU()
             ))
-        self.out_conv = nn.Sequential(nn.Conv2d(nb_channels[-2], nb_channels[-1], kernel_size = 3, stride = 1, padding = 1), nn.Tanh())
+        self.out_conv = nn.Sequential(nn.ConvTranspose2d(nb_channels[-1], img_shape[0], kernel_size = 1, stride = 1), nn.Tanh())
 
         if self.conditionnal:
             self.latent_dim -= self.nb_classes
@@ -210,13 +221,22 @@ class Generator(nn.Module):
             label_one_hot.scatter_(1, label.unsqueeze(1).long(), 1)
             x = torch.cat([x, label_one_hot], dim = -1)
 
-        x = F.leaky_relu(self.ln(x))
-        x = x.view(B, self.channel_start, self.out_discriminator_size, self.out_discriminator_size)
-
+        x = x.view(B, self.latent_dim, 1, 1)
+        x = self.init_convT(x)
         for convT in self.convTs:
             x = convT(x)
+
         x = self.out_conv(x)
         return x
+
+
+def weights_init(m):
+        classname = m.__class__.__name__
+        if classname.find('Conv') != -1:
+            m.weight.data.normal_(0.0, 0.02)
+        elif classname.find('BatchNorm') != -1:
+            m.weight.data.normal_(1.0, 0.02)
+            m.bias.data.fill_(0)
 
 class GAN(nn.Module):
     def __init__(self, config, img_shape, nb_classes):
@@ -231,15 +251,10 @@ class GAN(nn.Module):
             self.conditionnal = False
 
         self.discriminator = Discriminator(config, self.img_shape,self.nb_classes, self.conditionnal)
-        self.generator = Generator(config,  self.img_shape, self.discriminator.out_size,self.nb_classes, self.conditionnal)
-        '''        
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.normal_(m.weight, 0.0, 0.02)
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-        '''
+        self.generator = Generator(config,  self.img_shape, self.discriminator.start_gen_dim,self.nb_classes, self.conditionnal)
+        
+        self.discriminator.apply(weights_init)
+        self.generator.apply(weights_init)
 
     def forward(self, x_real, label = None):
         B = x_real.shape[0]
@@ -365,6 +380,13 @@ class VAE_Block(nn.Module):
                 nn.BatchNorm2d(out_channel))
         
         self.last_activation = last_activ
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+                
     def forward(self, x, label = None):
         if self.downsample is not None:
             resid = self.downsample(x)
@@ -531,18 +553,18 @@ class VAE_complex(nn.Module):
         x_hat = self.decoder(z)
         
         return x_hat, mu, logvar
-
+    
     def loss_function(self, x_out, x_true, unnormalize = None):
         try:
             reduc =  self.optim_params['reduction']
         except:
             reduc = 'mean' 
         if self.optim_params['criterion'] == 'bce':
-            loss_mse = F.binary_cross_entropy(unnormalize(x_out[0]), unnormalize(x_true), reduction = reduc)
+            loss_mse = self.img_shape[1] * self.img_shape[0] *F.binary_cross_entropy(unnormalize(x_out[0]), unnormalize(x_true), reduction = 'none').mean(dim = (1,2,3))
         else:
             loss_mse = F.mse_loss(x_out[0], x_true, reduction=reduc)
         loss_kl = ELBO_gaussian(x_out[1], x_out[2])
-        loss = loss_mse + self.optim_params['kl_weight']*loss_kl
+        loss = (loss_mse + self.optim_params['kl_weight']*loss_kl).mean()
         return {'loss':loss, 'recon_loss':loss_mse, 'kl_loss':loss_kl}
 
     @torch.no_grad()
@@ -611,7 +633,7 @@ class MultiStage_VAE(nn.Module):
         x_coarse = x_coarse.detach()
         out = self.second_stage(x_coarse)
 
-        return out, x_first, mu, logvar
+        return out, mu, logvar, x_first
     
     def reparameterize(self, mu, logvar):
         return self.vae.reparameterize(mu, logvar)
@@ -629,28 +651,25 @@ class MultiStage_VAE(nn.Module):
         x_pred = self.second_stage(x_first)
         return x_pred
     
-    def loss_function(self, x_out, x_true, unnormalize):
+    def loss_function(self, x_out, x_true, unnormalize = None):
         try:
             reduc =  self.optim_params['reduction']
         except:
             reduc = 'mean' 
         if self.optim_params['criterion'] == 'bce':
-            loss_mse = F.binary_cross_entropy(unnormalize(x_out[0]), unnormalize(x_true), reduction = reduc)
+            loss_mse = self.img_shape[1] * self.img_shape[0] *F.binary_cross_entropy(unnormalize(x_out[3]), unnormalize(x_true), reduction = 'none').mean(dim = (1,2,3))
         else:
-            loss_mse = F.mse_loss(x_out[0], x_true, reduction=reduc)
+            loss_mse = F.mse_loss(x_out[3], x_true, reduction=reduc)
+        loss_kl = ELBO_gaussian(x_out[1], x_out[2])
 
-        loss_l1 = F.l1_loss(x_out[1], x_true, reduction = reduc)
-        loss_kl = ELBO_gaussian(x_out[2], x_out[3])
-        loss = loss_mse + self.optim_params['kl_weight']*loss_kl + loss_l1
-        return {'loss':loss, 'recon_loss':loss_mse, 'kl_loss':loss_kl, 'l1__loss': loss_l1}
+        loss_l1 = F.l1_loss(x_out[0], x_true)
+        loss = (loss_mse + self.optim_params['kl_weight']*loss_kl).mean() + loss_l1
+        return {'loss':loss, 'recon_loss':loss_mse, 'kl_loss':loss_kl}
 
     @torch.no_grad()
     def eval_manifold(self, unnormalize , nb_points = 900):
         assert nb_points == int(math.sqrt(nb_points)**2)
-
         list_grids = []
-
-
         grid_side = int(math.sqrt(nb_points))
         xs = torch.linspace(-10,10,grid_side)
         ys = torch.linspace(-10,10,grid_side)
@@ -666,9 +685,7 @@ class MultiStage_VAE(nn.Module):
         grid = torchvision.utils.make_grid(generated_img, nrow = grid_side)
         list_grids.append(grid)
 
-
         return grid
-
 
 
 # Simple model, interesting for MNIST dataset especially the manifold function for 2-dimensional latent space. 
@@ -680,6 +697,7 @@ class VAE_3D(nn.Module):
         self.optim_params = config['optimization']
         self.img_channels = img_shape[0]
         self.img_size = img_shape[1]
+        self.img_shape = img_shape
         self.config = copy.deepcopy(config['model'])
 
         assert len(self.config['encoder_kernels']) == len(self.config['encoder_strides'])
@@ -796,13 +814,12 @@ class VAE_3D(nn.Module):
         except:
             reduc = 'mean' 
         if self.optim_params['criterion'] == 'bce':
-            loss_mse = F.binary_cross_entropy(unnormalize(x_out[0]), unnormalize(x_true), reduction = reduc)
+            loss_mse = self.img_shape[1] * self.img_shape[0] *F.binary_cross_entropy(unnormalize(x_out[0]), unnormalize(x_true), reduction = 'none').mean(dim = (1,2,3))
         else:
             loss_mse = F.mse_loss(x_out[0], x_true, reduction=reduc)
         loss_kl = ELBO_gaussian(x_out[1], x_out[2])
-        loss = loss_mse + self.optim_params['kl_weight']*loss_kl
+        loss = (loss_mse + self.optim_params['kl_weight']*loss_kl).mean()
         return {'loss':loss, 'recon_loss':loss_mse, 'kl_loss':loss_kl}
-
 
     @torch.no_grad()
     def sample(self, nb_images, z = None, label = None):            

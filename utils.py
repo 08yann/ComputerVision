@@ -285,14 +285,18 @@ def load_dataset(config, training = True):
     return dataset, unnormalizer, nb_classes
 
 
-def training_steps(model, dataloader, unnormalize = None, classification = False, logger = None):
+def training_steps(model, dataloader, unnormalize = None, classification = False, logger = None, plots = None):
     device = torch.device('cuda' if next(model.parameters()).is_cuda else 'cpu')
     losses = []
     optimizer = configure_optimizer(model)
-    
+    if plots is None:
+        plots = model.optim_params['epochs']
     loss_idx = 0
     loss_dict = {}
     for e in range(model.optim_params['epochs']):
+        if (e >0) & (e % plots == 0):
+            with torch.no_grad():
+                show_grid(model.sample(16), unnormalize)
         pbar = tqdm.tqdm(dataloader)
         for x, label in pbar:
             if type(optimizer) == dict:
@@ -347,7 +351,7 @@ def gan_step(model, optimizers, x_real, labels = None):
     return loss_discr.item(), loss_gen.item()
 
 def ELBO_gaussian(mu, logvar):
-    return -torch.mean(0.5 * torch.sum(1-mu**2 - logvar.exp() +logvar, dim = 1), dim = 0)
+    return -0.5 * torch.mean(1-mu**2 - logvar.exp() +logvar, dim = -1)
 
 @torch.no_grad
 def evaluation_step(model, test_dataloader,unnormalize, name_experiment, classification = False, logger = None, save_output =False):
@@ -413,8 +417,8 @@ def configure_optimizer(model):
 
     if 'lr_discriminator' in model.optim_params:
         optimizers = {
-            'discriminator': torch.optim.AdamW(model.discriminator.parameters(), lr = model.optim_params['lr_discriminator'], weight_decay = weight_decay, betas = (beta_1, beta_2)),
-            'generator': torch.optim.AdamW(model.generator.parameters(), lr = model.optim_params['lr_generator'], weight_decay = weight_decay, betas = (beta_1, beta_2))
+            'discriminator': torch.optim.Adam(model.discriminator.parameters(), lr = model.optim_params['lr_discriminator'], weight_decay = weight_decay, betas = (beta_1, beta_2)),
+            'generator': torch.optim.Adam(model.generator.parameters(), lr = model.optim_params['lr_generator'], weight_decay = weight_decay, betas = (beta_1, beta_2))
         }
         return optimizers
 
@@ -465,6 +469,11 @@ def train_latent_generator(model, dataloader):
     return losses
     
 
-def show_grid(img):
-    plt.imshow(torchvision.utils.make_grid(img.cpu()).permute(1,2,0))
+def show_grid(img, unnormalize = None):
+    assert img.dim() == 4
+    shape_grid = int(np.sqrt(img.shape[0]))
+    if unnormalize is not None:
+        plt.imshow(torchvision.utils.make_grid(unnormalize(img).cpu(), nrow=shape_grid).permute(1,2,0))
+    else:
+        plt.imshow(torchvision.utils.make_grid(img.cpu(), nrow=shape_grid).permute(1,2,0))
     plt.show()

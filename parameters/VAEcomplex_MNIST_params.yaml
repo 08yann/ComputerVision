@@ -1,7 +1,7 @@
 dataset:
   name: 'MNIST'
   batch_size: 64
-  img_size: 28
+  img_size: 32
   mean: 0.5
   std: 0.5
 model:
@@ -10,14 +10,14 @@ model:
   img_size: 28
   encoder_kernels: [7,3]
   encoder_strides: [2,2]
-  maxpool_stride: 2
+  maxpool_stride: 0
   avgpool: False
-  encoder_size_blocks: 2
+  encoder_size_blocks: 1
   encoder_channels: [32,64]
-  latent_dim: 2
-  decoder_channels: [64, 32]
-  decoder_nb_blockconvs: 0
-  conditionnal: True
+  latent_dim: 5
+  decoder_channels: [64,32]
+  decoder_nb_blockconvs: 1
+  conditionnal: False
 optimization:
   lr: 0.001
   kl_weight:  1
